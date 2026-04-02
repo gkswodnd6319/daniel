@@ -1,22 +1,25 @@
 """
 ═══════════════════════════════════════════════════════════════
   PERSONAL HUB — NiceGUI Dashboard
-  
+
   Tabs:
-    1. 🏟️ Matchday   — Live sports schedules (EPL, UCL, LCK, MLB, KBO)
-    2. 🎯 Career      — Career goals tracker & roadmap
-    3. 🚀 Projects    — Personal project workspace
-  
+    1. 🎯 Career      — Career goals tracker & roadmap
+    2. 🚀 Projects    — Personal project workspace
+    3. 🏟️ Matchday   — Live sports schedules (EPL, UCL, LCK, MLB, KBO)
+
   Run:
     pip install nicegui
     python main.py
-    
+
   Then open http://localhost:8080
 ═══════════════════════════════════════════════════════════════
 """
 
 from nicegui import ui, app
 from datetime import datetime
+
+from career_tab import build_career_tab
+from projects import build_projects_tab
 
 # ── Shared State (in-memory, swap for SQLite/JSON later) ────
 app.storage.general.setdefault('career_goals', [
@@ -34,463 +37,321 @@ app.storage.general.setdefault('projects', [
     ]},
 ])
 
-# ── Theme / Dark Mode ──────────────────────────────────────
-ui.dark_mode().enable()
+def setup_theme():
+    """Apply theme and custom CSS — call inside each @ui.page function."""
+    ui.dark_mode().enable()
+    ui.add_head_html('''
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-# ── Custom CSS ─────────────────────────────────────────────
-ui.add_head_html('''
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
-    
-    body { font-family: 'Outfit', sans-serif !important; }
-    .mono { font-family: 'JetBrains Mono', monospace !important; }
-    
-    .q-tab { text-transform: none !important; font-weight: 600 !important; letter-spacing: 0 !important; }
-    .q-card { border-radius: 12px !important; }
-    
-    .goal-card:hover { transform: translateY(-2px); transition: all 0.2s; }
-    .project-card:hover { transform: translateY(-2px); transition: all 0.2s; }
-    
-    .status-badge { 
-        padding: 2px 10px; border-radius: 20px; font-size: 11px; 
-        font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-    }
-    .badge-live { background: #ff1744; color: white; }
-    .badge-scheduled { background: #00e676; color: #0a0a0f; }
-    .badge-ft { background: #555570; color: #e8e8f0; }
-    
-    .league-pl { background: #3d195b; color: white; }
-    .league-ucl { background: #071d6b; color: white; }
-    .league-lck { background: #c89b3c; color: #0a0a0f; }
-    .league-mlb { background: #002d72; color: white; }
-    .league-kbo { background: #c8102e; color: white; }
-    
-    .section-title {
-        font-size: 13px; font-weight: 600; color: #8888a0;
-        font-family: 'JetBrains Mono', monospace;
-        letter-spacing: 0.05em; text-transform: uppercase;
-    }
-</style>
-''')
+        body { font-family: 'Outfit', sans-serif !important; }
+        .mono { font-family: 'JetBrains Mono', monospace !important; }
+
+        .q-tab { text-transform: none !important; font-weight: 600 !important; letter-spacing: 0 !important; }
+        .q-card { border-radius: 12px !important; }
+
+        .goal-card:hover { transform: translateY(-2px); transition: all 0.2s; }
+        .project-card:hover { transform: translateY(-2px); transition: all 0.2s; }
+
+        .status-badge {
+            padding: 2px 10px; border-radius: 20px; font-size: 11px;
+            font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .badge-live { background: #ff1744; color: white; }
+        .badge-scheduled { background: #00e676; color: #0a0a0f; }
+        .badge-ft { background: #555570; color: #e8e8f0; }
+
+        .league-pl { background: #3d195b; color: white; }
+        .league-ucl { background: #071d6b; color: white; }
+        .league-lck { background: #c89b3c; color: #0a0a0f; }
+        .league-mlb { background: #002d72; color: white; }
+        .league-kbo { background: #c8102e; color: white; }
+
+        .section-title {
+            font-size: 13px; font-weight: 600; color: #8888a0;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.05em; text-transform: uppercase;
+        }
+    </style>
+    ''')
 
 
 # ═══════════════════════════════════════════════════════════
-#  TAB 1: MATCHDAY — Sports Schedules
+#  SPORTS — Sub-tabs per league
 # ═══════════════════════════════════════════════════════════
+SUB_TABS = [
+    ('Premier League', '⚽ Premier League'),
+    ('Champions League', '🏆 Champions League'),
+    ('LCK', '🎮 LCK'),
+    ('LoL International', '🌏 LoL International'),
+    ('KBO', '⚾ KBO'),
+    ('MLB', '⚾ MLB'),
+]
+
+
 def build_sports_tab():
-    """Sports schedule tab with league filters."""
-    from sports_data import get_all_matches, LEAGUE_FILTERS
-    
-    selected_league = {'value': 'all'}
-    selected_status = {'value': 'all'}
-    
-    with ui.column().classes('w-full gap-4 p-4'):
-        # Header
-        ui.label('MATCHDAY').classes('text-3xl font-extrabold')
-        ui.label('EPL · UCL · LCK · MLB · KBO').classes('mono text-xs text-gray-500')
-        
-        # League filter chips
-        with ui.row().classes('gap-2 flex-wrap'):
-            league_buttons = {}
-            for key, info in LEAGUE_FILTERS.items():
-                btn = ui.button(
-                    info['label'],
-                    on_click=lambda k=key: filter_matches(k, None),
-                ).props('flat dense rounded').classes('text-xs')
-                league_buttons[key] = btn
-        
-        # Status filter
-        with ui.row().classes('gap-2'):
-            for status in ['all', 'live', 'upcoming', 'completed']:
-                ui.button(
-                    status.upper(),
-                    on_click=lambda s=status: filter_matches(None, s),
-                ).props('flat dense rounded outline').classes('text-xs')
-        
-        # Match cards container
-        matches_container = ui.column().classes('w-full gap-2')
-        
-        def filter_matches(league=None, status=None):
-            if league is not None:
-                selected_league['value'] = league
-            if status is not None:
-                selected_status['value'] = status
-            render_matches()
-        
-        def render_matches():
-            matches_container.clear()
-            matches = get_all_matches()
-            
-            # Apply filters
-            filtered = matches
-            if selected_league['value'] != 'all':
-                filtered = [m for m in filtered if m['league'] == selected_league['value']]
-            if selected_status['value'] == 'live':
-                filtered = [m for m in filtered if m['status'] == 'LIVE']
-            elif selected_status['value'] == 'upcoming':
-                filtered = [m for m in filtered if m['status'] == 'SCHEDULED']
-            elif selected_status['value'] == 'completed':
-                filtered = [m for m in filtered if m['status'] == 'FT']
-            
-            if not filtered:
-                with matches_container:
-                    ui.label('No matches found').classes('text-gray-500 text-center py-8')
-                return
-            
-            # Group by date
-            from itertools import groupby
-            filtered.sort(key=lambda m: m['date'])
-            for date_str, group in groupby(filtered, key=lambda m: m['date'][:10]):
-                with matches_container:
-                    ui.label(date_str).classes('section-title mt-4')
-                    for match in group:
-                        build_match_card(match)
-        
-        def build_match_card(match):
-            league_class = {
-                'Premier League': 'league-pl',
-                'Champions League': 'league-ucl',
-                'LCK': 'league-lck',
-                'MLB': 'league-mlb',
-                'KBO': 'league-kbo',
-            }.get(match['league'], '')
-            
-            status_class = {
-                'LIVE': 'badge-live',
-                'SCHEDULED': 'badge-scheduled',
-                'FT': 'badge-ft',
-            }.get(match['status'], 'badge-ft')
-            
-            with ui.card().classes('w-full p-3'):
-                # Top row: league badge + status
-                with ui.row().classes('w-full justify-between items-center'):
-                    ui.badge(match['league_short']).classes(f'{league_class} text-xs')
-                    
-                    status_text = match['status']
-                    if match['status'] == 'LIVE':
-                        status_text = f"🔴 LIVE {match.get('minute', '')}"
-                    elif match['status'] == 'SCHEDULED':
-                        status_text = match['time']
-                    
-                    ui.label(status_text).classes(f'mono text-xs')
-                
-                # Teams + Score
-                with ui.row().classes('w-full justify-between items-center py-2'):
-                    # Home
-                    with ui.column().classes('items-start'):
-                        ui.label(match['home']).classes('font-bold')
-                    
-                    # Score or time
-                    if match['status'] in ('LIVE', 'FT'):
-                        ui.label(f"{match['score_home']} : {match['score_away']}").classes('mono text-2xl font-extrabold')
+    """Sports tab with sub-tabs for each league."""
+    from sports_data import get_matches_by_league
+
+    with ui.column().classes('w-full gap-0'):
+        with ui.tabs().classes('w-full').props(
+            'dense active-color=green indicator-color=green no-caps'
+        ) as league_tabs:
+            tab_refs = {}
+            for key, label in SUB_TABS:
+                tab_refs[key] = ui.tab(key, label=label)
+
+        with ui.tab_panels(league_tabs, value=tab_refs[SUB_TABS[0][0]]).classes('w-full'):
+            for key, _ in SUB_TABS:
+                with ui.tab_panel(tab_refs[key]):
+                    if key == 'LCK':
+                        _build_lck_panel(get_matches_by_league)
+                    elif key == 'LoL International':
+                        _build_lol_intl_panel(get_matches_by_league)
                     else:
-                        ui.label(match['time']).classes('mono text-lg text-gray-500')
-                    
-                    # Away
-                    with ui.column().classes('items-end'):
-                        ui.label(match['away']).classes('font-bold')
-                
-                # Round info
-                ui.label(match.get('round', '')).classes('mono text-xs text-gray-600 text-center w-full')
-        
-        # Initial render
-        render_matches()
-        
-        # Auto-refresh timer
-        ui.timer(60.0, render_matches)
+                        _build_league_panel(key, get_matches_by_league)
 
 
-# ═══════════════════════════════════════════════════════════
-#  TAB 2: CAREER — Goals & Roadmap
-# ═══════════════════════════════════════════════════════════
-def build_career_tab():
-    """Career goals tracker with kanban-style status."""
-    
-    with ui.column().classes('w-full gap-4 p-4'):
-        ui.label('CAREER GOALS').classes('text-3xl font-extrabold')
-        ui.label('Track milestones · Set deadlines · Stay accountable').classes('mono text-xs text-gray-500')
-        
-        goals_container = ui.column().classes('w-full gap-3')
-        
-        def render_goals():
-            goals_container.clear()
-            goals = app.storage.general['career_goals']
-            
-            status_order = ['in_progress', 'not_started', 'done']
-            status_labels = {
-                'not_started': ('⬜ Not Started', 'bg-gray-800'),
-                'in_progress': ('🔵 In Progress', 'bg-blue-900'),
-                'done': ('✅ Done', 'bg-green-900'),
-            }
-            
-            for status in status_order:
-                status_goals = [g for g in goals if g['status'] == status]
-                if not status_goals:
-                    continue
-                    
-                with goals_container:
-                    label, _ = status_labels[status]
-                    ui.label(label).classes('section-title mt-2')
-                    
-                    for goal in status_goals:
-                        build_goal_card(goal)
-        
-        def build_goal_card(goal):
-            category_colors = {
-                'skill': '#00e676',
-                'career': '#448aff',
-                'project': '#ff9100',
-                'health': '#e040fb',
-                'finance': '#ffd740',
-            }
-            color = category_colors.get(goal.get('category', ''), '#888')
-            
-            with ui.card().classes('w-full p-4 goal-card'):
-                with ui.row().classes('w-full justify-between items-start'):
-                    with ui.column().classes('gap-1 flex-grow'):
-                        ui.label(goal['title']).classes('font-bold text-lg')
-                        if goal.get('notes'):
-                            ui.label(goal['notes']).classes('text-sm text-gray-400')
-                        with ui.row().classes('gap-2 items-center mt-1'):
-                            ui.badge(goal.get('category', 'general')).props(f'color="{color}" text-color="black"').classes('text-xs')
-                            if goal.get('deadline'):
-                                ui.label(f"📅 {goal['deadline']}").classes('mono text-xs text-gray-500')
-                    
-                    # Status toggle
-                    with ui.column().classes('gap-1'):
-                        ui.select(
-                            options={'not_started': 'Not Started', 'in_progress': 'In Progress', 'done': 'Done'},
-                            value=goal['status'],
-                            on_change=lambda e, g=goal: update_goal_status(g, e.value),
-                        ).props('dense outlined').classes('text-xs').style('min-width: 130px')
-                        
-                        ui.button(
-                            icon='delete', 
-                            on_click=lambda g=goal: delete_goal(g),
-                        ).props('flat dense round color=red-4 size=sm')
-        
-        def update_goal_status(goal, new_status):
-            goals = app.storage.general['career_goals']
-            for g in goals:
-                if g['id'] == goal['id']:
-                    g['status'] = new_status
-            app.storage.general['career_goals'] = goals
-            render_goals()
-        
-        def delete_goal(goal):
-            goals = app.storage.general['career_goals']
-            goals = [g for g in goals if g['id'] != goal['id']]
-            app.storage.general['career_goals'] = goals
-            render_goals()
-        
-        # Add new goal form
-        ui.separator()
-        ui.label('ADD NEW GOAL').classes('section-title')
-        
-        with ui.card().classes('w-full p-4'):
-            title_input = ui.input('Goal title', placeholder='e.g. Master Kubernetes').classes('w-full')
-            
-            with ui.row().classes('w-full gap-3'):
-                category_select = ui.select(
-                    options={'skill': 'Skill', 'career': 'Career', 'project': 'Project', 'health': 'Health', 'finance': 'Finance'},
-                    value='skill',
-                    label='Category',
-                ).props('dense outlined').classes('flex-grow')
-                
-                deadline_input = ui.input('Deadline', placeholder='YYYY-MM-DD').classes('flex-grow')
-            
-            notes_input = ui.textarea('Notes (optional)').classes('w-full').props('rows=2')
-            
-            def add_goal():
-                if not title_input.value:
-                    ui.notify('Please enter a goal title', type='warning')
-                    return
-                
-                goals = app.storage.general['career_goals']
-                new_id = max([g['id'] for g in goals], default=0) + 1
-                goals.append({
-                    'id': new_id,
-                    'title': title_input.value,
-                    'category': category_select.value,
-                    'status': 'not_started',
-                    'deadline': deadline_input.value or '',
-                    'notes': notes_input.value or '',
-                })
-                app.storage.general['career_goals'] = goals
-                
-                # Clear form
-                title_input.value = ''
-                deadline_input.value = ''
-                notes_input.value = ''
-                
-                ui.notify(f'Goal added: {goals[-1]["title"]}', type='positive')
-                render_goals()
-            
-            ui.button('Add Goal', icon='add', on_click=add_goal).props('color=primary')
-        
-        render_goals()
+def _build_lck_panel(get_matches_fn):
+    """LCK panel with inner tabs: Match Schedule + Standings."""
+    from sports_data import fetch_lck_standings
+
+    with ui.tabs().props(
+        'dense active-color=amber indicator-color=amber no-caps'
+    ).classes('w-full') as lck_tabs:
+        schedule_tab = ui.tab('lck_schedule', label='Match Schedule')
+        standings_tab = ui.tab('lck_standings', label='Standings')
+
+    with ui.tab_panels(lck_tabs, value=schedule_tab).classes('w-full'):
+        with ui.tab_panel(schedule_tab):
+            _build_league_panel('LCK', get_matches_fn)
+
+        with ui.tab_panel(standings_tab):
+            _build_standings_panel(fetch_lck_standings)
 
 
-# ═══════════════════════════════════════════════════════════
-#  TAB 3: PROJECTS — Personal Project Workspace
-# ═══════════════════════════════════════════════════════════
-def build_projects_tab():
-    """Personal projects with task lists."""
-    
-    with ui.column().classes('w-full gap-4 p-4'):
-        ui.label('PROJECTS').classes('text-3xl font-extrabold')
-        ui.label('Side projects · Ideas · Build log').classes('mono text-xs text-gray-500')
-        
-        projects_container = ui.column().classes('w-full gap-4')
-        
-        def render_projects():
-            projects_container.clear()
-            projects = app.storage.general['projects']
-            
-            if not projects:
-                with projects_container:
-                    ui.label('No projects yet. Start one below!').classes('text-gray-500 py-8 text-center')
-                return
-            
-            for project in projects:
-                with projects_container:
-                    build_project_card(project)
-        
-        def build_project_card(project):
-            status_colors = {
-                'active': 'green',
-                'paused': 'orange',
-                'idea': 'blue',
-                'done': 'gray',
-            }
-            color = status_colors.get(project.get('status', 'idea'), 'gray')
-            
-            tasks = project.get('tasks', [])
-            done_count = sum(1 for t in tasks if t.get('done'))
-            total_count = len(tasks)
-            progress = done_count / total_count if total_count > 0 else 0
-            
-            with ui.card().classes('w-full p-4 project-card'):
-                # Header
-                with ui.row().classes('w-full justify-between items-start'):
-                    with ui.column().classes('gap-1'):
-                        ui.label(project['name']).classes('font-bold text-xl')
-                        ui.label(project.get('description', '')).classes('text-sm text-gray-400')
-                        with ui.row().classes('gap-2 mt-1'):
-                            ui.badge(project.get('status', 'idea').upper()).props(f'color={color}').classes('text-xs')
-                            ui.label(f"🛠️ {project.get('tech', '')}").classes('mono text-xs text-gray-500')
-                            ui.label(f"📅 {project.get('created', '')}").classes('mono text-xs text-gray-500')
-                    
-                    with ui.row().classes('gap-1'):
-                        ui.button(
-                            icon='delete',
-                            on_click=lambda p=project: delete_project(p),
-                        ).props('flat dense round color=red-4 size=sm')
-                
-                # Progress bar
-                if total_count > 0:
-                    ui.label(f'{done_count}/{total_count} tasks').classes('mono text-xs text-gray-500 mt-2')
-                    ui.linear_progress(value=progress, show_value=False).props(f'color={color}').classes('mt-1')
-                
-                # Task list
-                ui.separator().classes('my-2')
-                
-                for i, task in enumerate(tasks):
-                    with ui.row().classes('w-full items-center gap-2'):
-                        ui.checkbox(
-                            value=task.get('done', False),
-                            on_change=lambda e, p=project, idx=i: toggle_task(p, idx, e.value),
-                        )
-                        label_class = 'line-through text-gray-600' if task.get('done') else ''
-                        ui.label(task['text']).classes(f'flex-grow {label_class}')
-                        ui.button(
-                            icon='close',
-                            on_click=lambda p=project, idx=i: remove_task(p, idx),
-                        ).props('flat dense round size=xs color=gray')
-                
-                # Add task input
-                with ui.row().classes('w-full mt-2 gap-2'):
-                    task_input = ui.input(placeholder='Add a task...').classes('flex-grow').props('dense')
-                    
-                    def add_task(p=project, inp=task_input):
-                        if not inp.value:
-                            return
-                        projects = app.storage.general['projects']
-                        for proj in projects:
-                            if proj['id'] == p['id']:
-                                proj.setdefault('tasks', []).append({'text': inp.value, 'done': False})
-                        app.storage.general['projects'] = projects
-                        inp.value = ''
-                        render_projects()
-                    
-                    ui.button(icon='add', on_click=add_task).props('dense flat color=primary')
-        
-        def toggle_task(project, task_idx, value):
-            projects = app.storage.general['projects']
-            for p in projects:
-                if p['id'] == project['id']:
-                    p['tasks'][task_idx]['done'] = value
-            app.storage.general['projects'] = projects
-            render_projects()
-        
-        def remove_task(project, task_idx):
-            projects = app.storage.general['projects']
-            for p in projects:
-                if p['id'] == project['id']:
-                    p['tasks'].pop(task_idx)
-            app.storage.general['projects'] = projects
-            render_projects()
-        
-        def delete_project(project):
-            projects = app.storage.general['projects']
-            projects = [p for p in projects if p['id'] != project['id']]
-            app.storage.general['projects'] = projects
-            render_projects()
-        
-        # New project form
-        ui.separator()
-        ui.label('START NEW PROJECT').classes('section-title')
-        
-        with ui.card().classes('w-full p-4'):
-            name_input = ui.input('Project name', placeholder='e.g. ROAS Prediction API').classes('w-full')
-            desc_input = ui.input('Description', placeholder='One-liner about the project').classes('w-full')
-            
-            with ui.row().classes('w-full gap-3'):
-                tech_input = ui.input('Tech stack', placeholder='e.g. Python, FastAPI').classes('flex-grow')
-                status_select = ui.select(
-                    options={'idea': 'Idea', 'active': 'Active', 'paused': 'Paused'},
-                    value='active',
-                    label='Status',
-                ).props('dense outlined').classes('flex-grow')
-            
-            def add_project():
-                if not name_input.value:
-                    ui.notify('Please enter a project name', type='warning')
-                    return
-                
-                projects = app.storage.general['projects']
-                new_id = max([p['id'] for p in projects], default=0) + 1
-                projects.append({
-                    'id': new_id,
-                    'name': name_input.value,
-                    'description': desc_input.value or '',
-                    'status': status_select.value,
-                    'tech': tech_input.value or '',
-                    'created': datetime.now().strftime('%Y-%m-%d'),
-                    'tasks': [],
-                })
-                app.storage.general['projects'] = projects
-                
-                name_input.value = ''
-                desc_input.value = ''
-                tech_input.value = ''
-                
-                ui.notify(f'Project created: {projects[-1]["name"]}', type='positive')
-                render_projects()
-            
-            ui.button('Create Project', icon='rocket_launch', on_click=add_project).props('color=primary')
-        
-        render_projects()
+def _build_lol_intl_panel(get_matches_fn):
+    """LoL International panel with inner tabs: Match Schedule + Bracket."""
+    from sports_data import fetch_lol_intl_bracket
+
+    with ui.tabs().props(
+        'dense active-color=amber indicator-color=amber no-caps'
+    ).classes('w-full') as intl_tabs:
+        schedule_tab = ui.tab('intl_schedule', label='Match Schedule')
+        bracket_tab = ui.tab('intl_bracket', label='Standings')
+
+    with ui.tab_panels(intl_tabs, value=schedule_tab).classes('w-full'):
+        with ui.tab_panel(schedule_tab):
+            _build_league_panel('LoL International', get_matches_fn)
+
+        with ui.tab_panel(bracket_tab):
+            _build_bracket_panel(fetch_lol_intl_bracket)
+
+
+def _build_bracket_panel(fetch_fn):
+    """Render international tournament bracket stages."""
+    container = ui.column().classes('w-full gap-4 p-4').style('max-width: 700px; margin: 0 auto;')
+
+    def render():
+        container.clear()
+        stages, tournament_name = fetch_fn()
+
+        if not stages:
+            with container:
+                ui.label('No tournament data available').classes('text-gray-500 text-center py-8')
+            return
+
+        with container:
+            if tournament_name:
+                ui.label(tournament_name).classes('text-xl font-extrabold')
+
+            for stage in stages:
+                ui.label(stage['name']).classes('section-title mt-4')
+
+                for section in stage['sections']:
+                    if section['name'] != stage['name']:
+                        ui.label(section['name']).classes('text-sm font-bold text-gray-400 mt-2')
+
+                    for match in section['matches']:
+                        _build_bracket_match(match)
+
+    render()
+    ui.timer(120.0, render)
+
+
+def _build_bracket_match(match):
+    """Render a single bracket match."""
+    is_completed = match['state'] == 'completed'
+    is_live = match['state'] == 'inProgress'
+
+    t1_win = match['team1_outcome'] == 'win'
+    t2_win = match['team2_outcome'] == 'win'
+
+    with ui.card().classes('w-full p-2'):
+        with ui.element('div').style(
+            'display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;'
+        ):
+            # Team 1
+            with ui.row().classes('items-center gap-2'):
+                if match['team1_image']:
+                    ui.image(match['team1_image']).style('width: 24px; height: 24px; border-radius: 4px;')
+                t1_cls = 'font-bold' + (' text-green-400' if t1_win else (' text-gray-600' if t2_win else ''))
+                ui.label(match['team1_code'] or match['team1_name']).classes(t1_cls)
+
+            # Score
+            if is_completed or is_live:
+                score_text = f"{match['team1_wins']} : {match['team2_wins']}"
+                cls = 'mono font-extrabold text-center'
+                if is_live:
+                    cls += ' text-red-400'
+                ui.label(score_text).classes(cls)
+            else:
+                ui.label('vs').classes('mono text-xs text-gray-500 text-center')
+
+            # Team 2
+            with ui.row().classes('items-center gap-2 justify-end'):
+                t2_cls = 'font-bold' + (' text-green-400' if t2_win else (' text-gray-600' if t1_win else ''))
+                ui.label(match['team2_code'] or match['team2_name']).classes(t2_cls)
+                if match['team2_image']:
+                    ui.image(match['team2_image']).style('width: 24px; height: 24px; border-radius: 4px;')
+
+
+def _build_standings_panel(fetch_fn):
+    """Render a standings table."""
+    container = ui.column().classes('w-full gap-0 p-4').style('max-width: 700px; margin: 0 auto;')
+
+    def render():
+        container.clear()
+        standings = fetch_fn()
+        if not standings:
+            with container:
+                ui.label('No standings data available').classes('text-gray-500 text-center py-8')
+            return
+
+        with container:
+            # Header row
+            with ui.row().classes('w-full items-center py-2 px-3').style(
+                'border-bottom: 1px solid #2a2a3a'
+            ):
+                ui.label('#').classes('mono text-xs text-gray-500').style('width: 30px')
+                ui.label('').style('width: 32px')  # logo space
+                ui.label('TEAM').classes('mono text-xs text-gray-500 flex-grow')
+                ui.label('W').classes('mono text-xs text-gray-500 text-center').style('width: 40px')
+                ui.label('L').classes('mono text-xs text-gray-500 text-center').style('width: 40px')
+                ui.label('WR').classes('mono text-xs text-gray-500 text-center').style('width: 50px')
+
+            for entry in standings:
+                wins = entry['wins']
+                losses = entry['losses']
+                total = wins + losses
+                wr = f"{wins / total * 100:.0f}%" if total > 0 else '-'
+
+                with ui.row().classes('w-full items-center py-2 px-3').style(
+                    'border-bottom: 1px solid #1a1a2a'
+                ):
+                    ui.label(str(entry['rank'])).classes('mono font-bold').style('width: 30px')
+                    if entry.get('image'):
+                        ui.image(entry['image']).style('width: 28px; height: 28px')
+                    else:
+                        ui.label('').style('width: 28px')
+                    ui.label(entry['name']).classes('font-bold flex-grow')
+                    ui.label(str(wins)).classes('mono text-center font-bold text-green-400').style('width: 40px')
+                    ui.label(str(losses)).classes('mono text-center text-red-400').style('width: 40px')
+                    ui.label(wr).classes('mono text-center').style('width: 50px')
+
+    render()
+    ui.timer(120.0, render)
+
+
+def _build_league_panel(league, get_matches_fn):
+    """Build match list for a single league sub-tab."""
+    from itertools import groupby
+
+    matches_container = ui.column().classes('w-full gap-2 p-4').style('max-width: 700px; margin: 0 auto;')
+
+    def render():
+        matches_container.clear()
+        matches = get_matches_fn(league)
+
+        if not matches:
+            with matches_container:
+                if league == 'LoL International':
+                    ui.label('No International Tournament in the next 30 days').classes('text-gray-500 text-center py-8')
+                else:
+                    ui.label('No matches found').classes('text-gray-500 text-center py-8')
+            return
+
+        matches.sort(key=lambda m: m['date'])
+        for date_str, group in groupby(matches, key=lambda m: m['date'][:10]):
+            with matches_container:
+                ui.label(date_str).classes('section-title mt-4')
+                for match in group:
+                    _build_match_card(match)
+
+    render()
+    ui.timer(60.0, render)
+
+
+def _build_match_card(match):
+    """Render a single match card."""
+    league_class = {
+        'Premier League': 'league-pl',
+        'Champions League': 'league-ucl',
+        'LCK': 'league-lck',
+        'LoL International': 'league-lck',
+        'MLB': 'league-mlb',
+        'KBO': 'league-kbo',
+    }.get(match['league'], '')
+
+    with ui.card().classes('w-full p-3'):
+        # Top row: league badge + tournament + status
+        with ui.row().classes('w-full justify-between items-center'):
+            with ui.row().classes('gap-2 items-center'):
+                ui.badge(match['league_short']).classes(f'{league_class} text-xs')
+                tournament = match.get('tournament', '')
+                if tournament:
+                    ui.label(tournament).classes('mono text-xs text-gray-400')
+
+            status_text = match['status']
+            if match['status'] == 'LIVE':
+                status_text = f"🔴 LIVE {match.get('minute', '')}"
+            elif match['status'] == 'SCHEDULED':
+                status_text = match['time']
+            ui.label(status_text).classes('mono text-xs')
+
+        # Teams + Score — use CSS grid for proper alignment
+        with ui.element('div').classes('w-full py-2').style(
+            'display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;'
+        ):
+            # Home team (left-aligned)
+            with ui.row().classes('items-center gap-2'):
+                home_img = match.get('home_image', '')
+                if home_img:
+                    ui.image(home_img).style('width: 32px; height: 32px; border-radius: 4px;')
+                with ui.column().classes('items-start gap-0'):
+                    ui.label(match['home']).classes('font-bold')
+                    home_rec = match.get('home_record', {})
+                    if home_rec:
+                        ui.label(f"{home_rec.get('wins', 0)}W {home_rec.get('losses', 0)}L").classes('mono text-xs text-gray-500')
+
+            # Score (centered)
+            if match['status'] in ('LIVE', 'FT'):
+                ui.label(f"{match['score_home']} : {match['score_away']}").classes('mono text-2xl font-extrabold text-center')
+            else:
+                ui.label(match['time']).classes('mono text-lg text-gray-500 text-center')
+
+            # Away team (right-aligned)
+            with ui.row().classes('items-center gap-2 justify-end'):
+                with ui.column().classes('items-end gap-0'):
+                    ui.label(match['away']).classes('font-bold')
+                    away_rec = match.get('away_record', {})
+                    if away_rec:
+                        ui.label(f"{away_rec.get('wins', 0)}W {away_rec.get('losses', 0)}L").classes('mono text-xs text-gray-500')
+                away_img = match.get('away_image', '')
+                if away_img:
+                    ui.image(away_img).style('width: 32px; height: 32px; border-radius: 4px;')
+
+        ui.label(match.get('round', '')).classes('mono text-xs text-gray-600 text-center w-full')
 
 
 # ═══════════════════════════════════════════════════════════
@@ -498,6 +359,7 @@ def build_projects_tab():
 # ═══════════════════════════════════════════════════════════
 @ui.page('/')
 def main_page():
+    setup_theme()
     # Header
     with ui.header().classes('items-center justify-between').style(
         'background: linear-gradient(135deg, #0a0a0f 0%, #12121a 100%); '
@@ -507,25 +369,25 @@ def main_page():
             'background: linear-gradient(135deg, #e8e8f0 20%, #00e676 100%); '
             '-webkit-background-clip: text; -webkit-text-fill-color: transparent;'
         )
-        
+
         ui.label(datetime.now().strftime('%a, %b %d %Y')).classes('mono text-xs text-gray-500')
-    
+
     # Tab navigation
     with ui.tabs().classes('w-full').props('dense active-color=green indicator-color=green') as tabs:
-        sports_tab = ui.tab('matchday', label='🏟️ Matchday', icon=None)
         career_tab = ui.tab('career', label='🎯 Career', icon=None)
         projects_tab = ui.tab('projects', label='🚀 Projects', icon=None)
-    
+        sports_tab = ui.tab('sports', label='🏟️ Sports', icon=None)
+
     # Tab panels
-    with ui.tab_panels(tabs, value=sports_tab).classes('w-full flex-grow'):
-        with ui.tab_panel(sports_tab):
-            build_sports_tab()
-        
+    with ui.tab_panels(tabs, value=career_tab).classes('w-full flex-grow'):
         with ui.tab_panel(career_tab):
             build_career_tab()
-        
+
         with ui.tab_panel(projects_tab):
             build_projects_tab()
+
+        with ui.tab_panel(sports_tab):
+            build_sports_tab()
 
 
 # ═══════════════════════════════════════════════════════════
