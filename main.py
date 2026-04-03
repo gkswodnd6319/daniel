@@ -19,9 +19,10 @@ from nicegui import ui, app
 from datetime import datetime
 
 from career_tab import build_career_tab
-from sports_data import warm_cache
+from sports_data import warm_cache, _cache as _sports_cache
 
-# Pre-fetch all sports data in background so tab switches are instant
+# Clear stale cache from hot reload, then pre-fetch fresh data
+_sports_cache.clear()
 warm_cache()
 from projects import build_projects_tab
 
@@ -258,6 +259,64 @@ def _build_league_from_config(cfg, fav, sports_data, get_matches_by_league, get_
         _build_league_schedule(key, get_matches_by_league, fav, cfg.get('empty_msg'))
 
 
+def _build_today_panel(get_matches_by_league, fav_teams):
+    """Today's matches across all leagues, highlighting favorite teams."""
+    container = ui.column().classes('w-full gap-2 p-4').style('max-width: 700px; margin: 0 auto;')
+
+    def render():
+        container.clear()
+        today = datetime.now().strftime('%Y-%m-%d')
+        all_today = []
+
+        for cfg in LEAGUES:
+            key = cfg['key']
+            try:
+                matches = get_matches_by_league(key)
+                for m in matches:
+                    if m.get('date', '')[:10] == today:
+                        all_today.append(m)
+            except Exception:
+                pass
+
+        fav_set = {cfg['key']: fav_teams[cfg['key']]['value'] for cfg in LEAGUES if fav_teams[cfg['key']]['value']}
+
+        with container:
+            ui.label(f"TODAY — {today}").classes('section-title mt-2 today-header')
+
+            if not all_today:
+                ui.label('No matches today').classes('text-gray-500 text-center py-8')
+                return
+
+            # My team's matches first
+            my_matches = []
+            other_matches = []
+            for m in all_today:
+                is_mine = any(
+                    _is_fav(fav, m.get('home', '')) or _is_fav(fav, m.get('away', ''))
+                    for fav in fav_set.values()
+                )
+                if is_mine:
+                    my_matches.append(m)
+                else:
+                    other_matches.append(m)
+
+            if my_matches:
+                ui.label('MY TEAMS').classes('section-title mt-2')
+                for m in sorted(my_matches, key=lambda x: x['date']):
+                    fav = next((f for f in fav_set.values() if _is_fav(f, m.get('home', '')) or _is_fav(f, m.get('away', ''))), '')
+                    _build_match_card(m, fav)
+
+            if other_matches:
+                ui.label('OTHER MATCHES').classes('section-title mt-4')
+                for m in sorted(other_matches, key=lambda x: x['date']):
+                    _build_match_card(m)
+
+    render()
+    # Register with all fav_teams so team selection re-renders
+    for cfg in LEAGUES:
+        fav_teams[cfg['key']]['renderers'].append(render)
+
+
 def build_sports_tab():
     """Sports tab — builds all leagues from LEAGUES config + Worlds meta-tab."""
     import sports_data
@@ -273,7 +332,9 @@ def build_sports_tab():
         with ui.tabs().classes('w-full').props(
             'dense active-color=green indicator-color=green no-caps'
         ) as league_tabs:
-            tab_refs = {cfg['key']: ui.tab(cfg['key'], label=cfg['label']) for cfg in LEAGUES}
+            tab_refs = {'Today': ui.tab('Today', label='📅 Today')}
+            for cfg in LEAGUES:
+                tab_refs[cfg['key']] = ui.tab(cfg['key'], label=cfg['label'])
             tab_refs['Worlds'] = ui.tab('Worlds', label='🌍 Worlds')
 
         built = set()
@@ -283,26 +344,27 @@ def build_sports_tab():
                 return
             built.add(key)
 
-            cfg_list = LEAGUES if key != 'Worlds' else None
             with tab_panels:
                 with ui.tab_panel(tab_refs[key]):
-                    if key == 'Worlds':
+                    if key == 'Today':
+                        _build_today_panel(get_matches_by_league, fav_teams)
+                    elif key == 'Worlds':
                         _build_worlds_panel(sports_data, get_matches_by_league, get_team_list, fav_teams)
                     else:
-                        cfg = next(c for c in cfg_list if c['key'] == key)
+                        cfg = next(c for c in LEAGUES if c['key'] == key)
                         fav = fav_teams[key]
                         _build_league_from_config(cfg, fav, sports_data, get_matches_by_league, get_team_list)
 
-        active_key = {'value': LEAGUES[0]['key']}
+        active_key = {'value': 'Today'}
 
         def on_tab_change(e):
             active_key['value'] = e.value
             build_league(e.value)
 
-        tab_panels = ui.tab_panels(league_tabs, value=tab_refs[LEAGUES[0]['key']],
+        tab_panels = ui.tab_panels(league_tabs, value=tab_refs['Today'],
                                    on_change=on_tab_change).classes('w-full')
 
-        build_league(LEAGUES[0]['key'])
+        build_league('Today')
 
         # Single global refresh timer — only re-renders the active tab's panels
         def global_refresh():
@@ -588,9 +650,13 @@ def _build_match_card(match, fav=''):
                 tournament = match.get('tournament', '')
                 if tournament and tournament != badge:
                     ui.label(tournament).classes('mono text-xs text-gray-400')
-            status = match['status']
-            st = f"🔴 LIVE {match.get('minute', '')}" if status == 'LIVE' else (match['time'] if status == 'SCHEDULED' else status)
-            ui.label(st).classes('mono text-xs')
+            status = match.get('status', '')
+            if status == 'LIVE':
+                ui.label(f"🔴 LIVE {match.get('minute', '')}").classes('mono text-xs')
+            elif status == 'SCHEDULED':
+                ui.label(match.get('time', '')).classes('mono text-xs text-gray-500')
+            else:
+                ui.label(status).classes('mono text-xs')
 
         with ui.element('div').classes('w-full py-2').style(
             'display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;'
@@ -600,7 +666,7 @@ def _build_match_card(match, fav=''):
             if match.get('status') in ('LIVE', 'FT') and match.get('score_home') is not None:
                 ui.label(f"{match['score_home']} : {match['score_away']}").classes('mono text-2xl font-extrabold text-center')
             else:
-                ui.label(match.get('time', '')).classes('mono text-lg text-gray-500 text-center')
+                ui.label('vs').classes('mono text-lg text-gray-600 text-center')
 
             _match_team_side(match, 'away', away_fav, align='end')
 

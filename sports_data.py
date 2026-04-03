@@ -47,6 +47,7 @@ def warm_cache():
     import threading
 
     def _warm():
+        _cache.clear()  # Clear stale data on reload
         for league in _LEAGUE_FETCH:
             try:
                 get_matches_by_league(league)
