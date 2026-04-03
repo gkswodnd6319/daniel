@@ -624,12 +624,13 @@ def _pretty_intl_name(slug):
 
 def fetch_lol_intl_schedule():
     """Fetch schedule across all LoL international leagues.
-    Returns matches from 7 days ago to 30 days ahead.
-    Returns [] if no matches in that window (with a flag), or None on API failure.
+    Returns matches from 30 days ago to 90 days ahead (wider window for
+    infrequent international events). Paginates through older pages to
+    find recent results.
     """
     now = datetime.now()
-    cutoff_past = now - timedelta(days=7)
-    cutoff_future = now + timedelta(days=30)
+    cutoff_past = now - timedelta(days=30)
+    cutoff_future = now + timedelta(days=90)
 
     all_matches = []
     for league_name, league_id in LOL_INTL_LEAGUES.items():
@@ -641,14 +642,47 @@ def fetch_lol_intl_schedule():
                 pretty = _pretty_intl_name(t['slug'])
                 tournaments.append((t['startDate'], t['endDate'], pretty))
 
-            resp = httpx.get(
-                f'{LOL_ESPORTS_BASE}/getSchedule',
-                headers=LOL_ESPORTS_HEADERS,
-                params={'hl': 'en-US', 'leagueId': league_id},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            events = resp.json()['data']['schedule']['events']
+            # Paginate through schedule pages to find events in our window
+            events = []
+            page_token = None
+            max_pages = 5  # safety limit
+            for _ in range(max_pages):
+                params = {'hl': 'en-US', 'leagueId': league_id}
+                if page_token:
+                    params['pageToken'] = page_token
+                resp = httpx.get(
+                    f'{LOL_ESPORTS_BASE}/getSchedule',
+                    headers=LOL_ESPORTS_HEADERS,
+                    params=params,
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                schedule = resp.json()['data']['schedule']
+                page_events = schedule.get('events', [])
+                events.extend(page_events)
+
+                # Check if we need older pages (events are newest-first on first page)
+                # Navigate to older pages if the oldest event on this page is still
+                # newer than our cutoff_past
+                older_token = schedule.get('pages', {}).get('older')
+                if not older_token:
+                    break
+
+                # Check if we already have events old enough
+                oldest_event_time = ''
+                for ev in page_events:
+                    t = ev.get('startTime', '')
+                    if t and (not oldest_event_time or t < oldest_event_time):
+                        oldest_event_time = t
+                if oldest_event_time:
+                    try:
+                        oldest_dt = datetime.fromisoformat(oldest_event_time.replace('Z', '+00:00')).replace(tzinfo=None)
+                        if oldest_dt < cutoff_past:
+                            break  # We have enough historical data
+                    except (ValueError, AttributeError):
+                        pass
+
+                page_token = older_token
 
             for e in events:
                 if e.get('type') != 'match':
@@ -1657,6 +1691,8 @@ def _parse_mlb_game(game):
     status_map = {
         'Final': 'FT', 'Game Over': 'FT', 'Completed Early': 'FT',
         'In Progress': 'LIVE', 'Live': 'LIVE',
+        'Postponed': 'PPD', 'Suspended': 'SUSP', 'Cancelled': 'CAN',
+        'Delayed Start': 'DELAY', 'Delayed': 'DELAY',
     }
     detailed = game.get('status', {}).get('detailedState', '')
     status = status_map.get(detailed, 'SCHEDULED')
@@ -1669,7 +1705,7 @@ def _parse_mlb_game(game):
         date_str = dt_local.strftime('%Y-%m-%d %H:%M')
         time_str = dt_local.strftime('%H:%M')
     except (ValueError, AttributeError):
-        date_str = game_date[:16]
+        date_str = game_date[:16] if len(game_date) >= 16 else game_date or ''
         time_str = ''
 
     minute = None
@@ -1710,10 +1746,12 @@ def _parse_mlb_game(game):
 
 
 def fetch_mlb_schedule():
-    """Fetch MLB schedule: today, -2 days, +3 days."""
-    now = datetime.now()
+    """Fetch MLB schedule: today (KST), -2 days, +5 days.
+    Uses wider window to account for KST being ahead of US timezones.
+    """
+    now = datetime.now()  # system local time
     start = (now - timedelta(days=2)).strftime('%Y-%m-%d')
-    end = (now + timedelta(days=3)).strftime('%Y-%m-%d')
+    end = (now + timedelta(days=5)).strftime('%Y-%m-%d')
     try:
         resp = httpx.get(f'{MLB_API_BASE}/schedule', params={
             'sportId': 1, 'startDate': start, 'endDate': end,

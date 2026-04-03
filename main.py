@@ -33,6 +33,8 @@ app.storage.general.setdefault('career_goals', [
     {'id': 3, 'title': 'Publish a side project', 'category': 'project', 'status': 'not_started', 'deadline': '2026-08-01', 'notes': 'Open source on GitHub'},
 ])
 
+app.storage.general.setdefault('career_timeline', [])
+
 app.storage.general.setdefault('projects', [
     {'id': 1, 'name': 'Personal Hub App', 'description': 'NiceGUI-based personal dashboard', 'status': 'active', 'tech': 'Python, NiceGUI', 'created': '2026-04-01', 'tasks': [
         {'text': 'Set up NiceGUI project structure', 'done': True},
@@ -655,6 +657,11 @@ def _build_match_card(match, fav=''):
                 ui.label(f"🔴 LIVE {match.get('minute', '')}").classes('mono text-xs')
             elif status == 'SCHEDULED':
                 ui.label(match.get('time', '')).classes('mono text-xs text-gray-500')
+            elif status == 'PPD':
+                ui.label('POSTPONED').classes('mono text-xs text-amber-400')
+            elif status in ('SUSP', 'DELAY', 'CAN'):
+                label_map = {'SUSP': 'SUSPENDED', 'DELAY': 'DELAYED', 'CAN': 'CANCELLED'}
+                ui.label(label_map.get(status, status)).classes('mono text-xs text-amber-400')
             else:
                 ui.label(status).classes('mono text-xs')
 
