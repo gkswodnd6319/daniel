@@ -19,6 +19,10 @@ from nicegui import ui, app
 from datetime import datetime
 
 from career_tab import build_career_tab
+from sports_data import warm_cache
+
+# Pre-fetch all sports data in background so tab switches are instant
+warm_cache()
 from projects import build_projects_tab
 
 # ── Shared State (in-memory, swap for SQLite/JSON later) ────
@@ -72,286 +76,562 @@ def setup_theme():
             font-family: 'JetBrains Mono', monospace;
             letter-spacing: 0.05em; text-transform: uppercase;
         }
+
+        .fav-highlight {
+            border-left: 3px solid #00e676 !important;
+            background: rgba(0, 230, 118, 0.06) !important;
+        }
+        .fav-team-name { color: #00e676 !important; }
+        .today-header {
+            color: #00e676 !important;
+            font-weight: 700 !important;
+        }
+
+        .bracket-round { min-width: 200px; }
+        .bracket-match {
+            border: 1px solid #2a2a3a; border-radius: 8px;
+            padding: 6px 10px; margin: 4px 0;
+        }
+        .bracket-match.fav-highlight {
+            border-color: #00e676 !important;
+        }
+        .bracket-team { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+        .bracket-team.winner { color: #00e676; font-weight: 700; }
+        .bracket-team.loser { color: #555; }
+        .bracket-connector {
+            border-left: 2px solid #2a2a3a;
+            border-top: 2px solid #2a2a3a;
+            border-bottom: 2px solid #2a2a3a;
+            width: 20px; align-self: center;
+        }
     </style>
     ''')
 
 
 # ═══════════════════════════════════════════════════════════
-#  SPORTS — Sub-tabs per league
+#  SPORTS — Data-driven league configuration
 # ═══════════════════════════════════════════════════════════
-SUB_TABS = [
-    ('Premier League', '⚽ Premier League'),
-    ('Champions League', '🏆 Champions League'),
-    ('LCK', '🎮 LCK'),
-    ('LoL International', '🌏 LoL International'),
-    ('KBO', '⚾ KBO'),
-    ('MLB', '⚾ MLB'),
+
+# Standings column definitions: (header, key, width, color_class)
+_COLS_WL = [
+    ('W', 'wins', '40px', 'font-bold text-green-400'),
+    ('L', 'losses', '40px', 'text-red-400'),
+    ('WR', '_wr', '50px', ''),
+]
+_COLS_KBO = [
+    ('G', 'games', '35px', ''),
+    ('W', 'wins', '35px', 'font-bold text-green-400'),
+    ('L', 'losses', '35px', 'text-red-400'),
+    ('D', 'draws', '35px', 'text-gray-400'),
+    ('PCT', 'win_rate', '50px', ''),
+    ('GB', 'gb', '45px', ''),
+]
+_COLS_PL = [
+    ('G', 'games', '30px', ''),
+    ('W', 'wins', '30px', 'font-bold text-green-400'),
+    ('D', 'draws', '30px', 'text-gray-400'),
+    ('L', 'losses', '30px', 'text-red-400'),
+    ('GD', 'gd', '35px', ''),
+    ('Pts', 'points', '35px', 'font-bold text-amber-400'),
+]
+_COLS_MLB = [
+    ('W', 'wins', '40px', 'font-bold text-green-400'),
+    ('L', 'losses', '40px', 'text-red-400'),
+    ('PCT', 'win_rate', '50px', ''),
+    ('GB', 'gb', '45px', ''),
+]
+
+LEAGUE_BADGE_CLASS = {
+    'Premier League': 'league-pl',
+    'Champions League': 'league-ucl',
+    'LCK': 'league-lck',
+    'LoL International': 'league-lck',
+    'MLB': 'league-mlb',
+    'KBO': 'league-kbo',
+}
+
+# Each league config: (tab_key, tab_label, standings_fn_name, standings_columns, bracket_fn_name, empty_msg)
+LEAGUES = [
+    {
+        'key': 'Premier League', 'label': '⚽ Premier League',
+        'standings_fn': 'fetch_pl_standings', 'standings_cols': _COLS_PL,
+    },
+    {
+        'key': 'Champions League', 'label': '🏆 Champions League',
+        'standings_fn': 'fetch_ucl_standings', 'standings_cols': _COLS_PL,
+        'bracket_fn': 'fetch_ucl_bracket', 'bracket_label': 'Knockout Bracket',
+    },
+    {
+        'key': 'LCK', 'label': '🎮 LCK',
+        'standings_fn': 'fetch_lck_standings', 'standings_cols': _COLS_WL,
+    },
+    {
+        'key': 'LoL International', 'label': '🌏 LoL International',
+        'bracket_fn': 'fetch_lol_intl_bracket',
+        'empty_msg': 'No International Tournament in the next 30 days',
+    },
+    {
+        'key': 'KBO', 'label': '⚾ KBO',
+        'standings_fn': 'fetch_kbo_standings', 'standings_cols': _COLS_KBO,
+        'bracket_fn': 'fetch_kbo_postseason', 'bracket_label': 'Post-Season',
+        'bracket_empty': 'No post-season games yet',
+    },
+    {
+        'key': 'MLB', 'label': '⚾ MLB',
+        'standings_fn': 'fetch_mlb_standings', 'standings_cols': _COLS_MLB,
+        'standings_grouped': 'division',
+        'bracket_fn': 'fetch_mlb_postseason', 'bracket_label': 'Post-Season',
+        'bracket_empty': 'No post-season games yet',
+    },
+]
+
+# Worlds sub-tabs config (nested inside the Worlds parent tab)
+_COLS_WBC = [
+    ('W', 'wins', '35px', 'font-bold text-green-400'),
+    ('L', 'losses', '35px', 'text-red-400'),
+    ('PCT', 'win_rate', '50px', ''),
+]
+
+WORLDS_TABS = [
+    {
+        'key': 'World Cup', 'label': '⚽ World Cup',
+        'bracket_fn': 'fetch_worldcup_bracket', 'bracket_label': 'Knockout Bracket',
+        'bracket_empty': 'No World Cup data available yet',
+        'empty_msg': 'No World Cup matches scheduled yet',
+    },
+    {
+        'key': 'WBC', 'label': '⚾ WBC',
+        'standings_fn': 'fetch_wbc_standings', 'standings_cols': _COLS_WBC,
+        'standings_grouped': 'pool',
+        'bracket_fn': 'fetch_wbc_bracket', 'bracket_label': 'Knockout Bracket',
+        'bracket_empty': 'No WBC knockout data yet',
+    },
+    {
+        'key': 'Intl Others', 'label': '🌐 Others',
+        'empty_msg': 'No international matches scheduled',
+    },
 ]
 
 
+def _build_league_from_config(cfg, fav, sports_data, get_matches_by_league, get_team_list):
+    """Build a league panel from config dict — reusable for both LEAGUES and WORLDS_TABS."""
+    key = cfg['key']
+    _build_team_selector(key, get_team_list, fav)
+
+    standings_fn = getattr(sports_data, cfg['standings_fn'], None) if 'standings_fn' in cfg else None
+    bracket_fn = getattr(sports_data, cfg['bracket_fn'], None) if 'bracket_fn' in cfg else None
+
+    inner_tabs_cfg = [('sched', 'Match Schedule')]
+    if standings_fn:
+        inner_tabs_cfg.append(('standings', 'Standings'))
+    if bracket_fn:
+        inner_tabs_cfg.append(('bracket', cfg.get('bracket_label', 'Standings')))
+
+    if len(inner_tabs_cfg) > 1:
+        with ui.tabs().props(
+            'dense active-color=amber indicator-color=amber no-caps'
+        ).classes('w-full') as inner_tabs:
+            tab_map = {tid: ui.tab(f'{key}_{tid}', label=lbl) for tid, lbl in inner_tabs_cfg}
+
+        inner_built = set()
+        # Reverse map: full tab name -> short tid
+        tab_name_to_tid = {f'{key}_{tid}': tid for tid, _ in inner_tabs_cfg}
+
+        def build_inner(tab_name):
+            tid = tab_name_to_tid.get(tab_name, tab_name)
+            if tid in inner_built:
+                return
+            inner_built.add(tid)
+            with inner_panels:
+                with ui.tab_panel(tab_map[tid]):
+                    if tid == 'sched':
+                        _build_league_schedule(key, get_matches_by_league, fav, cfg.get('empty_msg'))
+                    elif tid == 'standings' and standings_fn:
+                        _build_standings_panel(standings_fn, fav, cfg['standings_cols'], cfg.get('standings_grouped'), cfg.get('standings_title'))
+                    elif tid == 'bracket' and bracket_fn:
+                        _build_bracket_panel(bracket_fn, fav, cfg.get('bracket_empty'))
+
+        inner_panels = ui.tab_panels(inner_tabs, value=tab_map['sched'],
+                                     on_change=lambda e, bld=build_inner: bld(e.value)).classes('w-full')
+        build_inner(f'{key}_sched')
+    else:
+        _build_league_schedule(key, get_matches_by_league, fav, cfg.get('empty_msg'))
+
+
 def build_sports_tab():
-    """Sports tab with sub-tabs for each league."""
-    from sports_data import get_matches_by_league
+    """Sports tab — builds all leagues from LEAGUES config + Worlds meta-tab."""
+    import sports_data
+    from sports_data import get_matches_by_league, get_team_list
+
+    all_configs = LEAGUES + WORLDS_TABS
+    fav_teams = {
+        cfg['key']: {'value': app.storage.user.get(f"fav_{cfg['key']}", ''), 'renderers': []}
+        for cfg in all_configs
+    }
 
     with ui.column().classes('w-full gap-0'):
         with ui.tabs().classes('w-full').props(
             'dense active-color=green indicator-color=green no-caps'
         ) as league_tabs:
-            tab_refs = {}
-            for key, label in SUB_TABS:
-                tab_refs[key] = ui.tab(key, label=label)
+            tab_refs = {cfg['key']: ui.tab(cfg['key'], label=cfg['label']) for cfg in LEAGUES}
+            tab_refs['Worlds'] = ui.tab('Worlds', label='🌍 Worlds')
 
-        with ui.tab_panels(league_tabs, value=tab_refs[SUB_TABS[0][0]]).classes('w-full'):
-            for key, _ in SUB_TABS:
+        built = set()
+
+        def build_league(key):
+            if key in built:
+                return
+            built.add(key)
+
+            cfg_list = LEAGUES if key != 'Worlds' else None
+            with tab_panels:
                 with ui.tab_panel(tab_refs[key]):
-                    if key == 'LCK':
-                        _build_lck_panel(get_matches_by_league)
-                    elif key == 'LoL International':
-                        _build_lol_intl_panel(get_matches_by_league)
+                    if key == 'Worlds':
+                        _build_worlds_panel(sports_data, get_matches_by_league, get_team_list, fav_teams)
                     else:
-                        _build_league_panel(key, get_matches_by_league)
+                        cfg = next(c for c in cfg_list if c['key'] == key)
+                        fav = fav_teams[key]
+                        _build_league_from_config(cfg, fav, sports_data, get_matches_by_league, get_team_list)
+
+        active_key = {'value': LEAGUES[0]['key']}
+
+        def on_tab_change(e):
+            active_key['value'] = e.value
+            build_league(e.value)
+
+        tab_panels = ui.tab_panels(league_tabs, value=tab_refs[LEAGUES[0]['key']],
+                                   on_change=on_tab_change).classes('w-full')
+
+        build_league(LEAGUES[0]['key'])
+
+        # Single global refresh timer — only re-renders the active tab's panels
+        def global_refresh():
+            key = active_key['value']
+            if key == 'Worlds':
+                # Worlds has its own sub-tabs, refresh handled there
+                return
+            if key in fav_teams:
+                for fn in fav_teams[key].get('renderers', []):
+                    fn()
+
+        ui.timer(300.0, global_refresh)
 
 
-def _build_lck_panel(get_matches_fn):
-    """LCK panel with inner tabs: Match Schedule + Standings."""
-    from sports_data import fetch_lck_standings
-
+def _build_worlds_panel(sports_data, get_matches_by_league, get_team_list, fav_teams):
+    """Build the Worlds meta-tab with sub-tabs: World Cup, WBC, Others."""
     with ui.tabs().props(
-        'dense active-color=amber indicator-color=amber no-caps'
-    ).classes('w-full') as lck_tabs:
-        schedule_tab = ui.tab('lck_schedule', label='Match Schedule')
-        standings_tab = ui.tab('lck_standings', label='Standings')
+        'dense active-color=cyan indicator-color=cyan no-caps'
+    ).classes('w-full') as worlds_tabs:
+        wtab_refs = {cfg['key']: ui.tab(cfg['key'], label=cfg['label']) for cfg in WORLDS_TABS}
 
-    with ui.tab_panels(lck_tabs, value=schedule_tab).classes('w-full'):
-        with ui.tab_panel(schedule_tab):
-            _build_league_panel('LCK', get_matches_fn)
+    worlds_built = set()
 
-        with ui.tab_panel(standings_tab):
-            _build_standings_panel(fetch_lck_standings)
+    def build_worlds_sub(key):
+        if key in worlds_built:
+            return
+        worlds_built.add(key)
+        cfg = next(c for c in WORLDS_TABS if c['key'] == key)
+        fav = fav_teams[key]
+        with worlds_panels:
+            with ui.tab_panel(wtab_refs[key]):
+                _build_league_from_config(cfg, fav, sports_data, get_matches_by_league, get_team_list)
 
+    worlds_panels = ui.tab_panels(worlds_tabs, value=wtab_refs[WORLDS_TABS[0]['key']],
+                                  on_change=lambda e: build_worlds_sub(e.value)).classes('w-full')
 
-def _build_lol_intl_panel(get_matches_fn):
-    """LoL International panel with inner tabs: Match Schedule + Bracket."""
-    from sports_data import fetch_lol_intl_bracket
-
-    with ui.tabs().props(
-        'dense active-color=amber indicator-color=amber no-caps'
-    ).classes('w-full') as intl_tabs:
-        schedule_tab = ui.tab('intl_schedule', label='Match Schedule')
-        bracket_tab = ui.tab('intl_bracket', label='Standings')
-
-    with ui.tab_panels(intl_tabs, value=schedule_tab).classes('w-full'):
-        with ui.tab_panel(schedule_tab):
-            _build_league_panel('LoL International', get_matches_fn)
-
-        with ui.tab_panel(bracket_tab):
-            _build_bracket_panel(fetch_lol_intl_bracket)
+    build_worlds_sub(WORLDS_TABS[0]['key'])
 
 
-def _build_bracket_panel(fetch_fn):
-    """Render international tournament bracket stages."""
-    container = ui.column().classes('w-full gap-4 p-4').style('max-width: 700px; margin: 0 auto;')
+# ── Helpers ────────────────────────────────────────────────
+
+def _is_fav(fav, name):
+    """Check if name matches favorite (either direction substring)."""
+    if not fav or not name:
+        return False
+    return fav in name or name in fav
+
+
+# ── Reusable UI components ────────────────────────────────
+
+def _build_team_selector(league, get_team_list, fav_state):
+    """Dropdown to pick favorite team. Triggers re-render on change."""
+    teams = get_team_list(league)
+    if not teams:
+        return
+    options = {'': 'None'} | {t: t for t in teams}
+
+    # Reset stale stored value that no longer exists in options
+    if fav_state['value'] and fav_state['value'] not in options:
+        fav_state['value'] = ''
+        app.storage.user[f'fav_{league}'] = ''
+
+    def on_change(e):
+        fav_state['value'] = e.value
+        app.storage.user[f'fav_{league}'] = e.value
+        for fn in fav_state['renderers']:
+            fn()
+
+    with ui.row().classes('w-full items-center gap-2 px-4 py-2').style('max-width: 700px; margin: 0 auto;'):
+        ui.label('MY TEAM').classes('section-title')
+        ui.select(options=options, value=fav_state['value'], on_change=on_change,
+                  ).props('dense outlined').classes('text-sm').style('min-width: 180px')
+
+
+def _register(fav_state, render_fn, container=None):
+    """Run a render function and register it for fav-change re-renders."""
+    if container:
+        with container:
+            ui.spinner('dots', size='lg').classes('mx-auto my-8')
+    try:
+        render_fn()
+    except Exception:
+        if container:
+            container.clear()
+            with container:
+                ui.label('Failed to load data').classes('text-gray-500 text-center py-8')
+    fav_state['renderers'].append(render_fn)
+
+
+def _build_league_schedule(league, get_matches_fn, fav_state, empty_msg=None):
+    """Match list with today pinned at top."""
+    from itertools import groupby
+
+    container = ui.column().classes('w-full gap-2 p-4').style('max-width: 700px; margin: 0 auto;')
 
     def render():
         container.clear()
-        stages, tournament_name = fetch_fn()
+        matches = get_matches_fn(league)
+        fav = fav_state['value']
+        today = datetime.now().strftime('%Y-%m-%d')
 
-        if not stages:
+        if not matches:
             with container:
-                ui.label('No tournament data available').classes('text-gray-500 text-center py-8')
+                ui.label(empty_msg or 'No matches found').classes('text-gray-500 text-center py-8')
             return
 
+        matches.sort(key=lambda m: m['date'])
+        today_matches = [m for m in matches if m['date'][:10] == today]
+        past = [m for m in matches if m['date'][:10] < today]
+        future = [m for m in matches if m['date'][:10] > today]
+        # Limit: last 10 past + today + next 20 future
+        capped = past[-10:] + today_matches + future[:20]
+
         with container:
-            if tournament_name:
-                ui.label(tournament_name).classes('text-xl font-extrabold')
+            if today_matches:
+                ui.label(f"TODAY — {today}").classes('section-title mt-2 today-header')
+                for m in today_matches:
+                    _build_match_card(m, fav)
+            other = [m for m in capped if m['date'][:10] != today]
+            for date_str, group in groupby(other, key=lambda m: m['date'][:10]):
+                ui.label(date_str).classes('section-title mt-4')
+                for m in group:
+                    _build_match_card(m, fav)
 
-            for stage in stages:
-                ui.label(stage['name']).classes('section-title mt-4')
-
-                for section in stage['sections']:
-                    if section['name'] != stage['name']:
-                        ui.label(section['name']).classes('text-sm font-bold text-gray-400 mt-2')
-
-                    for match in section['matches']:
-                        _build_bracket_match(match)
-
-    render()
-    ui.timer(120.0, render)
+    _register(fav_state, render, container)
 
 
-def _build_bracket_match(match):
-    """Render a single bracket match."""
-    is_completed = match['state'] == 'completed'
-    is_live = match['state'] == 'inProgress'
-
-    t1_win = match['team1_outcome'] == 'win'
-    t2_win = match['team2_outcome'] == 'win'
-
-    with ui.card().classes('w-full p-2'):
-        with ui.element('div').style(
-            'display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;'
-        ):
-            # Team 1
-            with ui.row().classes('items-center gap-2'):
-                if match['team1_image']:
-                    ui.image(match['team1_image']).style('width: 24px; height: 24px; border-radius: 4px;')
-                t1_cls = 'font-bold' + (' text-green-400' if t1_win else (' text-gray-600' if t2_win else ''))
-                ui.label(match['team1_code'] or match['team1_name']).classes(t1_cls)
-
-            # Score
-            if is_completed or is_live:
-                score_text = f"{match['team1_wins']} : {match['team2_wins']}"
-                cls = 'mono font-extrabold text-center'
-                if is_live:
-                    cls += ' text-red-400'
-                ui.label(score_text).classes(cls)
-            else:
-                ui.label('vs').classes('mono text-xs text-gray-500 text-center')
-
-            # Team 2
-            with ui.row().classes('items-center gap-2 justify-end'):
-                t2_cls = 'font-bold' + (' text-green-400' if t2_win else (' text-gray-600' if t1_win else ''))
-                ui.label(match['team2_code'] or match['team2_name']).classes(t2_cls)
-                if match['team2_image']:
-                    ui.image(match['team2_image']).style('width: 24px; height: 24px; border-radius: 4px;')
-
-
-def _build_standings_panel(fetch_fn):
-    """Render a standings table."""
+def _build_standings_panel(fetch_fn, fav_state, columns, group_by=None, title=None):
+    """Generic standings table driven by column definitions. Optional grouping."""
     container = ui.column().classes('w-full gap-0 p-4').style('max-width: 700px; margin: 0 auto;')
+
+    def _render_header():
+        with ui.row().classes('w-full items-center py-2 px-3').style('border-bottom: 1px solid #2a2a3a'):
+            ui.label('#').classes('mono text-xs text-gray-500').style('width: 30px')
+            ui.label('').style('width: 32px')
+            ui.label('TEAM').classes('mono text-xs text-gray-500 flex-grow')
+            for header, _, width, _ in columns:
+                ui.label(header).classes('mono text-xs text-gray-500 text-center').style(f'width: {width}')
 
     def render():
         container.clear()
         standings = fetch_fn()
+        fav = fav_state['value']
         if not standings:
             with container:
                 ui.label('No standings data available').classes('text-gray-500 text-center py-8')
             return
 
         with container:
-            # Header row
-            with ui.row().classes('w-full items-center py-2 px-3').style(
-                'border-bottom: 1px solid #2a2a3a'
-            ):
-                ui.label('#').classes('mono text-xs text-gray-500').style('width: 30px')
-                ui.label('').style('width: 32px')  # logo space
-                ui.label('TEAM').classes('mono text-xs text-gray-500 flex-grow')
-                ui.label('W').classes('mono text-xs text-gray-500 text-center').style('width: 40px')
-                ui.label('L').classes('mono text-xs text-gray-500 text-center').style('width: 40px')
-                ui.label('WR').classes('mono text-xs text-gray-500 text-center').style('width: 50px')
+            auto_title = title or (standings[0].get('_title', '') if standings else '')
+            if auto_title:
+                ui.label(auto_title).classes('text-lg font-extrabold mb-2')
+            if group_by:
+                from itertools import groupby as igroupby
+                for group_name, entries in igroupby(standings, key=lambda e: e.get(group_by, '')):
+                    ui.label(group_name).classes('section-title mt-4 mb-1')
+                    _render_header()
+                    for entry in entries:
+                        _render_standings_row(entry, fav, columns)
+            else:
+                _render_header()
+                for entry in standings:
+                    _render_standings_row(entry, fav, columns)
 
-            for entry in standings:
-                wins = entry['wins']
-                losses = entry['losses']
-                total = wins + losses
-                wr = f"{wins / total * 100:.0f}%" if total > 0 else '-'
+    def _render_standings_row(entry, fav, cols):
+        is_fav = _is_fav(fav, entry['name'])
+        row_cls = 'w-full items-center py-2 px-3' + (' fav-highlight' if is_fav else '')
+        with ui.row().classes(row_cls).style('border-bottom: 1px solid #1a1a2a'):
+            ui.label(str(entry['rank'])).classes('mono font-bold').style('width: 30px')
+            if entry.get('image'):
+                ui.image(entry['image']).style('width: 28px; height: 28px;').props('fit=contain')
+            else:
+                ui.icon('sports').classes('text-gray-600').style('width: 28px; font-size: 18px; text-align: center;')
+            ui.label(entry['name']).classes(
+                'font-bold flex-grow' + (' fav-team-name' if is_fav else ''))
+            for _, key, width, color in cols:
+                if key == '_wr':
+                    total = entry['wins'] + entry['losses']
+                    val = f"{entry['wins'] / total * 100:.0f}%" if total > 0 else '-'
+                else:
+                    val = str(entry.get(key, ''))
+                ui.label(val).classes(f'mono text-center {color}'.strip()).style(f'width: {width}')
 
-                with ui.row().classes('w-full items-center py-2 px-3').style(
-                    'border-bottom: 1px solid #1a1a2a'
-                ):
-                    ui.label(str(entry['rank'])).classes('mono font-bold').style('width: 30px')
-                    if entry.get('image'):
-                        ui.image(entry['image']).style('width: 28px; height: 28px')
-                    else:
-                        ui.label('').style('width: 28px')
-                    ui.label(entry['name']).classes('font-bold flex-grow')
-                    ui.label(str(wins)).classes('mono text-center font-bold text-green-400').style('width: 40px')
-                    ui.label(str(losses)).classes('mono text-center text-red-400').style('width: 40px')
-                    ui.label(wr).classes('mono text-center').style('width: 50px')
-
-    render()
-    ui.timer(120.0, render)
+    _register(fav_state, render, container)
 
 
-def _build_league_panel(league, get_matches_fn):
-    """Build match list for a single league sub-tab."""
-    from itertools import groupby
-
-    matches_container = ui.column().classes('w-full gap-2 p-4').style('max-width: 700px; margin: 0 auto;')
+def _build_bracket_panel(fetch_fn, fav_state, empty_msg=None):
+    """Tournament bracket — horizontal tree with rounds side by side."""
+    container = ui.element('div').classes('w-full p-4').style('overflow-x: auto;')
 
     def render():
-        matches_container.clear()
-        matches = get_matches_fn(league)
-
-        if not matches:
-            with matches_container:
-                if league == 'LoL International':
-                    ui.label('No International Tournament in the next 30 days').classes('text-gray-500 text-center py-8')
-                else:
-                    ui.label('No matches found').classes('text-gray-500 text-center py-8')
+        container.clear()
+        stages, tournament_name = fetch_fn()
+        fav = fav_state['value']
+        if not stages:
+            with container:
+                ui.label(empty_msg or 'No tournament data available').classes('text-gray-500 text-center py-8')
             return
+        with container:
+            if tournament_name:
+                ui.label(tournament_name).classes('text-xl font-extrabold mb-4')
+            # Horizontal bracket: each stage is a column
+            with ui.row().classes('items-start gap-0').style('min-width: max-content;'):
+                for i, stage in enumerate(stages):
+                    all_matches = []
+                    for sec in stage['sections']:
+                        all_matches.extend(sec['matches'])
+                    with ui.column().classes('bracket-round gap-0').style(
+                        f'justify-content: space-around; min-height: {max(len(all_matches) * 80, 100)}px;'
+                    ):
+                        ui.label(stage['name']).classes('section-title text-center mb-2')
+                        for match in all_matches:
+                            _build_bracket_match(match, fav)
+                    # Connector between rounds
+                    if i < len(stages) - 1:
+                        with ui.element('div').style(
+                            f'width: 24px; align-self: center; '
+                            f'border-top: 2px solid #2a2a3a;'
+                        ):
+                            pass
 
-        matches.sort(key=lambda m: m['date'])
-        for date_str, group in groupby(matches, key=lambda m: m['date'][:10]):
-            with matches_container:
-                ui.label(date_str).classes('section-title mt-4')
-                for match in group:
-                    _build_match_card(match)
-
-    render()
-    ui.timer(60.0, render)
+    _register(fav_state, render, container)
 
 
-def _build_match_card(match):
-    """Render a single match card."""
-    league_class = {
-        'Premier League': 'league-pl',
-        'Champions League': 'league-ucl',
-        'LCK': 'league-lck',
-        'LoL International': 'league-lck',
-        'MLB': 'league-mlb',
-        'KBO': 'league-kbo',
-    }.get(match['league'], '')
+def _bracket_team_cls(is_fav, is_win, other_win):
+    """CSS classes for a team in a bracket match."""
+    cls = 'bracket-team'
+    if is_fav:
+        return cls + ' fav-team-name'
+    if is_win:
+        return cls + ' winner'
+    if other_win:
+        return cls + ' loser'
+    return cls
 
-    with ui.card().classes('w-full p-3'):
-        # Top row: league badge + tournament + status
+
+def _build_bracket_match(match, fav=''):
+    """Single bracket match card — compact vertical layout."""
+    t1_win = match.get('team1_outcome') == 'win'
+    t2_win = match.get('team2_outcome') == 'win'
+    t1_fav = _is_fav(fav, match.get('team1_name', '')) or _is_fav(fav, match.get('team1_code', ''))
+    t2_fav = _is_fav(fav, match.get('team2_name', '')) or _is_fav(fav, match.get('team2_code', ''))
+
+    highlight = ' fav-highlight' if (t1_fav or t2_fav) else ''
+    is_done = match.get('state') in ('completed', 'inProgress')
+
+    with ui.element('div').classes(f'bracket-match{highlight}'):
+        # Date line
+        date = match.get('date', '')
+        if date:
+            ui.label(date + ' KST').classes('mono text-xs text-gray-500').style('margin-bottom: 2px;')
+        elif match['state'] == 'unstarted':
+            ui.label('TBD').classes('mono text-xs text-gray-600').style('margin-bottom: 2px;')
+        # Team 1 row
+        with ui.element('div').classes(_bracket_team_cls(t1_fav, t1_win, t2_win)):
+            if match['team1_image']:
+                ui.image(match['team1_image']).style('width: 20px; height: 20px;')
+            ui.label(match['team1_code'] or match['team1_name']).classes('text-sm')
+            if is_done:
+                ui.label(str(match['team1_wins'])).classes('mono text-sm ml-auto font-bold')
+        # Separator
+        ui.element('div').style('border-top: 1px solid #2a2a3a; margin: 2px 0;')
+        # Team 2 row
+        with ui.element('div').classes(_bracket_team_cls(t2_fav, t2_win, t1_win)):
+            if match['team2_image']:
+                ui.image(match['team2_image']).style('width: 20px; height: 20px;')
+            ui.label(match['team2_code'] or match['team2_name']).classes('text-sm')
+            if is_done:
+                ui.label(str(match['team2_wins'])).classes('mono text-sm ml-auto font-bold')
+
+
+def _build_match_card(match, fav=''):
+    """Single match card with favorite highlight."""
+    league_cls = LEAGUE_BADGE_CLASS.get(match['league'], '')
+    home_fav = _is_fav(fav, match['home'])
+    away_fav = _is_fav(fav, match['away'])
+
+    with ui.card().classes('w-full p-3' + (' fav-highlight' if (home_fav or away_fav) else '')):
         with ui.row().classes('w-full justify-between items-center'):
             with ui.row().classes('gap-2 items-center'):
-                ui.badge(match['league_short']).classes(f'{league_class} text-xs')
+                badge = match.get('league_short', '')
+                ui.badge(badge).classes(f'{league_cls} text-xs')
                 tournament = match.get('tournament', '')
-                if tournament:
+                if tournament and tournament != badge:
                     ui.label(tournament).classes('mono text-xs text-gray-400')
+            status = match['status']
+            st = f"🔴 LIVE {match.get('minute', '')}" if status == 'LIVE' else (match['time'] if status == 'SCHEDULED' else status)
+            ui.label(st).classes('mono text-xs')
 
-            status_text = match['status']
-            if match['status'] == 'LIVE':
-                status_text = f"🔴 LIVE {match.get('minute', '')}"
-            elif match['status'] == 'SCHEDULED':
-                status_text = match['time']
-            ui.label(status_text).classes('mono text-xs')
-
-        # Teams + Score — use CSS grid for proper alignment
         with ui.element('div').classes('w-full py-2').style(
             'display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;'
         ):
-            # Home team (left-aligned)
-            with ui.row().classes('items-center gap-2'):
-                home_img = match.get('home_image', '')
-                if home_img:
-                    ui.image(home_img).style('width: 32px; height: 32px; border-radius: 4px;')
-                with ui.column().classes('items-start gap-0'):
-                    ui.label(match['home']).classes('font-bold')
-                    home_rec = match.get('home_record', {})
-                    if home_rec:
-                        ui.label(f"{home_rec.get('wins', 0)}W {home_rec.get('losses', 0)}L").classes('mono text-xs text-gray-500')
+            _match_team_side(match, 'home', home_fav, align='start')
 
-            # Score (centered)
-            if match['status'] in ('LIVE', 'FT'):
+            if match.get('status') in ('LIVE', 'FT') and match.get('score_home') is not None:
                 ui.label(f"{match['score_home']} : {match['score_away']}").classes('mono text-2xl font-extrabold text-center')
             else:
-                ui.label(match['time']).classes('mono text-lg text-gray-500 text-center')
+                ui.label(match.get('time', '')).classes('mono text-lg text-gray-500 text-center')
 
-            # Away team (right-aligned)
-            with ui.row().classes('items-center gap-2 justify-end'):
-                with ui.column().classes('items-end gap-0'):
-                    ui.label(match['away']).classes('font-bold')
-                    away_rec = match.get('away_record', {})
-                    if away_rec:
-                        ui.label(f"{away_rec.get('wins', 0)}W {away_rec.get('losses', 0)}L").classes('mono text-xs text-gray-500')
-                away_img = match.get('away_image', '')
-                if away_img:
-                    ui.image(away_img).style('width: 32px; height: 32px; border-radius: 4px;')
+            _match_team_side(match, 'away', away_fav, align='end')
 
-        ui.label(match.get('round', '')).classes('mono text-xs text-gray-600 text-center w-full')
+        if match.get('round'):
+            ui.label(match['round']).classes('mono text-xs text-gray-600 text-center w-full')
+
+
+def _team_logo(img):
+    """Render a team logo, or a placeholder icon if missing."""
+    if img:
+        ui.image(img).classes('w-10 h-8').style('min-width: 40px;').props('fit=contain')
+    else:
+        ui.icon('sports').classes('text-gray-600').style('width: 40px; min-width: 40px; text-align: center; font-size: 20px;')
+
+
+def _match_team_side(match, side, is_fav, align):
+    """Render one side (home/away) of a match card."""
+    name = match.get(side, 'TBD')
+    img = match.get(f'{side}_image', '')
+    rec = match.get(f'{side}_record', {})
+    name_cls = 'font-bold' + (' fav-team-name' if is_fav else '')
+
+    with ui.row().classes(f'items-center gap-2' + (f' justify-{align}' if align == 'end' else '')):
+        if align == 'start':
+            _team_logo(img)
+        with ui.column().classes(f'items-{align} gap-0'):
+            ui.label(name).classes(name_cls)
+            if rec:
+                ui.label(f"{rec.get('wins', 0)}W {rec.get('losses', 0)}L").classes('mono text-xs text-gray-500')
+        if align == 'end':
+            _team_logo(img)
 
 
 # ═══════════════════════════════════════════════════════════

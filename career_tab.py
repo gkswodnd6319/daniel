@@ -95,7 +95,11 @@ def build_career_tab():
                     label='Category',
                 ).props('dense outlined').classes('flex-grow')
 
-                deadline_input = ui.input('Deadline', placeholder='YYYY-MM-DD').classes('flex-grow')
+                with ui.input('Deadline').classes('flex-grow') as deadline_input:
+                    with deadline_input.add_slot('append'):
+                        ui.icon('edit_calendar').on('click', lambda: menu.open()).classes('cursor-pointer')
+                    with ui.menu() as menu:
+                        ui.date(on_change=lambda e: (deadline_input.set_value(e.value), menu.close()))
 
             notes_input = ui.textarea('Notes (optional)').classes('w-full').props('rows=2')
 

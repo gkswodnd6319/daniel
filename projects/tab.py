@@ -96,7 +96,7 @@ def build_projects_tab():
         def toggle_task(project, task_idx, value):
             projects = app.storage.general['projects']
             for p in projects:
-                if p['id'] == project['id']:
+                if p['id'] == project['id'] and task_idx < len(p.get('tasks', [])):
                     p['tasks'][task_idx]['done'] = value
             app.storage.general['projects'] = projects
             render_projects()
@@ -104,7 +104,7 @@ def build_projects_tab():
         def remove_task(project, task_idx):
             projects = app.storage.general['projects']
             for p in projects:
-                if p['id'] == project['id']:
+                if p['id'] == project['id'] and task_idx < len(p.get('tasks', [])):
                     p['tasks'].pop(task_idx)
             app.storage.general['projects'] = projects
             render_projects()
