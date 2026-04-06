@@ -19,12 +19,16 @@ from nicegui import ui, app
 from datetime import datetime
 
 from career_tab import build_career_tab
-from sports_data import warm_cache, _cache as _sports_cache
+from sports_data import warm_cache as warm_sports_cache, _cache as _sports_cache
+from projects.fx_data import warm_cache as warm_fx_cache, _cache as _fx_cache
 
-# Clear stale cache from hot reload, then pre-fetch fresh data
+# Clear stale caches from hot reload, then pre-fetch fresh data
 _sports_cache.clear()
-warm_cache()
+_fx_cache.clear()
+warm_sports_cache()
+warm_fx_cache()
 from projects import build_projects_tab
+from projects.rich_man import build_rich_man_tab
 
 # ── Shared State (in-memory, swap for SQLite/JSON later) ────
 app.storage.general.setdefault('career_goals', [
@@ -737,10 +741,27 @@ def main_page():
             build_career_tab()
 
         with ui.tab_panel(projects_tab):
-            build_projects_tab()
+            _build_projects_with_subs()
 
         with ui.tab_panel(sports_tab):
             build_sports_tab()
+
+
+def _build_projects_with_subs():
+    """Projects tab with sub-tabs: project list + Rich Man FX."""
+    with ui.column().classes('w-full gap-0'):
+        with ui.tabs().props(
+            'dense active-color=amber indicator-color=amber no-caps'
+        ).classes('w-full') as sub_tabs:
+            list_tab = ui.tab('proj_list', label='🚀 Projects')
+            richman_tab = ui.tab('richman', label='💰 Rich Man')
+
+        with ui.tab_panels(sub_tabs, value=list_tab).classes('w-full'):
+            with ui.tab_panel(list_tab):
+                build_projects_tab()
+
+            with ui.tab_panel(richman_tab):
+                build_rich_man_tab()
 
 
 # ═══════════════════════════════════════════════════════════

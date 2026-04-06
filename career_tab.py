@@ -15,96 +15,353 @@ COMPANY_COLORS = [
 
 
 def _parse_resume_text(text: str) -> list[dict]:
-    """Best-effort extraction of career entries from resume text.
+    """General-purpose career entry extractor from resume text.
 
-    Looks for patterns like:
-      Company Name | Role Title | Jan 2020 - Mar 2023
-      Company Name, Role Title, 2020 - 2023
-      Role Title at Company Name (Jan 2020 - Present)
+    Handles a wide range of international resume formats:
+      2025.08 ~ Present             Korean (YYYY.MM ~ ...)
+      Jan 2020 - Dec 2023           English abbreviated month
+      January 2020 - December 2023  English full month
+      01/2020 - 12/2023             MM/YYYY numeric
+      2020/01 - 2023/12             YYYY/MM numeric
+      2020 - 2023                   Year-only
+    Separators: -, –, —, ~, ～, to, through, until
+    End keywords: Present, Current, Now, 현재, Ongoing, Till Date
+
+    Company/role extraction handles:
+      Company (Role)                Parenthesized role
+      Company — Role                Em-dash separated
+      Company | Role                Pipe separated
+      Company, Role                 Comma separated
+      Role at Company               "at" keyword
+      Dates first (Korean)          2025.08 ~ Present  Company (Role)
+      Dates last (Western)          Company, Role, Jan 2020 - Dec 2023
+      Multi-line (role + company on adjacent lines)
     """
     entries = []
-    # Pattern: lines with date ranges like "Jan 2020 - Dec 2023" or "2020 - Present"
-    date_pattern = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)?\.?\s*(\d{4})\s*[-–—to]+\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)?\.?\s*(\d{4})|(Present|Current|Now))'
+
+    # ── Pre-process: strip markdown/rich-text formatting ──
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)          # **bold**
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)               # *italic*
+    text = re.sub(r'__([^_]+)__', r'\1', text)               # __bold__
+    text = re.sub(r'`([^`]+)`', r'\1', text)                 # `code`
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)     # [text](url)
+    text = re.sub(r'<[^>]+>', '', text)                       # HTML tags
+
+    # ── Constants ──
+    _MONTH_ABBR = r'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec'
+    _MONTH_FULL = r'January|February|March|April|May|June|July|August|September|October|November|December'
+    _END_WORDS = r'Present|Current|Now|현재|Ongoing|Till\s*Date'
+    _SEP = r'[-–—~～]+'
+    _SEP_WORDS = r'(?:[-–—~～]+|to|through|until)'
+
+    MONTH_MAP = {
+        'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+        'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+        'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
+        'january': '01', 'february': '02', 'march': '03', 'april': '04',
+        'june': '06', 'july': '07', 'august': '08',
+        'september': '09', 'october': '10', 'november': '11', 'december': '12',
+    }
+
+    ROLE_KEYWORDS = re.compile(
+        r'\b('
+        r'engineer|developer|programmer|architect|devops|sre|sysadmin|admin(?:istrator)?|'
+        r'manager|director|chief|head|lead|principal|senior|junior|staff|'
+        r'analyst|scientist|researcher|statistician|'
+        r'designer|artist|illustrator|'
+        r'consultant|advisor|strategist|planner|'
+        r'coordinator|specialist|officer|associate|assistant|'
+        r'intern|trainee|apprentice|fellow|'
+        r'professor|lecturer|instructor|teacher|tutor|'
+        r'founder|co-founder|cto|ceo|coo|cfo|cmo|cpo|vp|'
+        r'accountant|auditor|attorney|lawyer|paralegal|'
+        r'nurse|physician|therapist|pharmacist|technician|'
+        r'editor|writer|journalist|reporter|producer|'
+        r'recruiter|hr|'
+        r'sales|marketing|product|project|program|operations|support'
+        r')\b',
+        re.IGNORECASE,
+    )
+
+    # Lines that are section headers, not career entries
+    SECTION_KEYWORDS = re.compile(
+        r'^\s*(?:#|\*)*\s*(?:'
+        r'education|certificate|certification|license|skill|language|'
+        r'award|honor|hobby|interest|volunteer|publication|'
+        r'summary|objective|profile|reference|training|course'
+        r')\b',
+        re.IGNORECASE,
+    )
+
+    current_year = datetime.now().year
+    current_month = datetime.now().strftime('%m')
+
+    # ── Date patterns (most specific first) ──
+    # Each returns a callable: match -> (start_year, start_month, end_year, end_month)
+    date_patterns = []
+
+    def _add(pattern, extractor):
+        date_patterns.append((re.compile(pattern, re.IGNORECASE), extractor))
+
+    # 1. YYYY.MM ~ YYYY.MM / Present (Korean)
+    def _extract_kr(m):
+        sy, sm = m.group('sy'), m.group('sm')
+        if m.group('ey'):
+            return sy, sm, m.group('ey'), m.group('em')
+        return sy, sm, str(current_year), current_month
+    _add(
+        rf'(?P<sy>\d{{4}})\.(?P<sm>\d{{2}})\s*{_SEP}\s*(?:(?P<ey>\d{{4}})\.(?P<em>\d{{2}})|(?:{_END_WORDS}))',
+        _extract_kr,
+    )
+
+    # 2. MM/YYYY - MM/YYYY / Present (numeric month/year)
+    def _extract_mmyyyy(m):
+        sy, sm = m.group('sy'), m.group('sm')
+        if m.group('ey'):
+            return sy, sm, m.group('ey'), m.group('em')
+        return sy, sm, str(current_year), current_month
+    _add(
+        rf'(?P<sm>\d{{2}})/(?P<sy>\d{{4}})\s*{_SEP_WORDS}\s*(?:(?P<em>\d{{2}})/(?P<ey>\d{{4}})|(?:{_END_WORDS}))',
+        _extract_mmyyyy,
+    )
+
+    # 3. YYYY/MM - YYYY/MM / Present (numeric year/month)
+    def _extract_yyyymm(m):
+        sy, sm = m.group('sy'), m.group('sm')
+        if m.group('ey'):
+            return sy, sm, m.group('ey'), m.group('em')
+        return sy, sm, str(current_year), current_month
+    _add(
+        rf'(?P<sy>\d{{4}})/(?P<sm>\d{{2}})\s*{_SEP_WORDS}\s*(?:(?P<ey>\d{{4}})/(?P<em>\d{{2}})|(?:{_END_WORDS}))',
+        _extract_yyyymm,
+    )
+
+    # 4. Full month name: January 2020 - December 2023 / Present
+    def _extract_full_month(m):
+        sm = MONTH_MAP.get(m.group('sm').lower(), '01')
+        sy = m.group('sy')
+        if m.group('em'):
+            em = MONTH_MAP.get(m.group('em').lower(), '12')
+            return sy, sm, m.group('ey'), em
+        return sy, sm, str(current_year), current_month
+    _add(
+        rf'(?P<sm>{_MONTH_FULL})\.?\s*(?P<sy>\d{{4}})\s*{_SEP_WORDS}\s*(?:(?P<em>{_MONTH_FULL})\.?\s*(?P<ey>\d{{4}})|(?:{_END_WORDS}))',
+        _extract_full_month,
+    )
+
+    # 5. Abbreviated month: Jan 2020 - Dec 2023 / Present
+    def _extract_abbr_month(m):
+        sm = MONTH_MAP.get(m.group('sm').lower()[:3], '01')
+        sy = m.group('sy')
+        if m.group('em'):
+            em = MONTH_MAP.get(m.group('em').lower()[:3], '12')
+            return sy, sm, m.group('ey'), em
+        return sy, sm, str(current_year), current_month
+    _add(
+        rf'(?P<sm>{_MONTH_ABBR})\.?\s*,?\s*(?P<sy>\d{{4}})\s*{_SEP_WORDS}\s*(?:(?P<em>{_MONTH_ABBR})\.?\s*,?\s*(?P<ey>\d{{4}})|(?:{_END_WORDS}))',
+        _extract_abbr_month,
+    )
+
+    # 6. Year only: 2020 - 2023 / Present (must not be inside phone/ID numbers)
+    def _extract_year(m):
+        sy = m.group('sy')
+        if m.group('ey'):
+            return sy, '01', m.group('ey'), '12'
+        return sy, '01', str(current_year), current_month
+    _add(
+        rf'(?<![/.\d])(?P<sy>\d{{4}})\s*{_SEP_WORDS}\s*(?:(?P<ey>\d{{4}})(?![/.\d])|(?:{_END_WORDS}))',
+        _extract_year,
+    )
+
+    def _try_match_date(line):
+        """Try all date patterns on a line. Returns (match, sy, sm, ey, em) or None."""
+        for pat, extractor in date_patterns:
+            m = pat.search(line)
+            if m:
+                sy, sm, ey, em = extractor(m)
+                # Validate year range (1960 to near future)
+                try:
+                    isy, iey = int(sy), int(ey)
+                    if isy < 1960 or isy > current_year + 5:
+                        continue
+                    if iey < 1960 or iey > current_year + 5:
+                        continue
+                    if iey < isy:
+                        continue
+                    # Validate month range
+                    ism, iem = int(sm), int(em)
+                    if not (1 <= ism <= 12 and 1 <= iem <= 12):
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                return m, sy, sm, ey, em
+        return None
+
+    def _extract_company_role(line, match, line_idx, lines_list):
+        """Extract company and role from text around a date match."""
+        suffix = line[match.end():].strip()
+        suffix = re.sub(r'^[~～\-–—:,\s]+', '', suffix).strip()
+        prefix = line[:match.start()].strip()
+        prefix = re.sub(r'[|,–—\-~～:]+\s*$', '', prefix).strip()
+
+        # Use both sides; prefer the longer/more meaningful one as primary
+        # Korean: dates first, content after. Western: content first, dates after.
+        if suffix and prefix:
+            # If suffix has role keywords or parenthesized role, prefer it
+            if '(' in suffix or ROLE_KEYWORDS.search(suffix):
+                context = suffix
+            elif '(' in prefix or ROLE_KEYWORDS.search(prefix):
+                context = prefix
+            else:
+                context = suffix if len(suffix) > len(prefix) else prefix
+        else:
+            context = suffix or prefix
+
+        if not context:
+            return None, None
+
+        # ── Pattern: "Role at Company" ──
+        at_match = re.match(r'^(.+?)\s+at\s+(.+)$', context, re.IGNORECASE)
+        if at_match and ROLE_KEYWORDS.search(at_match.group(1)):
+            return at_match.group(2).strip(), at_match.group(1).strip()
+
+        # ── Pattern: "Company (Role)" or "Company — Role" ──
+        paren_match = re.match(r'^(.+?)\s*\(([^)]+)\)\s*(.*)$', context)
+        if paren_match:
+            company = paren_match.group(1).strip()
+            role = paren_match.group(2).strip()
+            extra = paren_match.group(3).strip()
+            # If extra text after parens looks like a department/major, append to role
+            if extra and not ROLE_KEYWORDS.search(extra):
+                role = f"{role} — {extra}" if len(extra) < 50 else role
+            return company, role
+
+        # ── Pattern: "Company — Role" (em-dash) ──
+        dash_match = re.match(r'^(.+?)\s*[—–]\s*(.+)$', context)
+        if dash_match:
+            left, right = dash_match.group(1).strip(), dash_match.group(2).strip()
+            if ROLE_KEYWORDS.search(right):
+                return left, right
+            if ROLE_KEYWORDS.search(left):
+                return right, left
+            return left, right  # default: left=company, right=role
+
+        # ── Pattern: "Part1 | Part2" or "Part1, Part2" ──
+        parts = re.split(r'\s*[|]\s*', context)
+        if len(parts) < 2:
+            parts = re.split(r'\s*,\s*', context)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        if len(parts) >= 2:
+            # Use role keyword heuristic to decide order
+            if ROLE_KEYWORDS.search(parts[0]) and not ROLE_KEYWORDS.search(parts[1]):
+                return parts[1], parts[0]
+            if ROLE_KEYWORDS.search(parts[1]) and not ROLE_KEYWORDS.search(parts[0]):
+                return parts[0], parts[1]
+            # Default: first=company, second=role
+            return parts[0], parts[1]
+
+        if len(parts) == 1:
+            text_chunk = parts[0]
+            # Check adjacent lines for context
+            for offset in [-1, 1]:
+                adj_idx = line_idx + offset
+                if 0 <= adj_idx < len(lines_list):
+                    adj = lines_list[adj_idx].strip()
+                    adj = re.sub(r'^[-•·#*\s]+', '', adj).strip()
+                    if not adj or _try_match_date(adj):
+                        continue
+                    if SECTION_KEYWORDS.match(adj):
+                        continue
+                    # Adjacent line has context — figure out which is company, which is role
+                    if ROLE_KEYWORDS.search(text_chunk):
+                        return adj, text_chunk
+                    if ROLE_KEYWORDS.search(adj):
+                        return text_chunk, adj
+                    # Heuristic: shorter text is more likely a role title
+                    if offset == -1:
+                        return adj, text_chunk  # previous line = company
+                    break
+
+            # Single chunk, no adjacent context
+            if ROLE_KEYWORDS.search(text_chunk):
+                return '', text_chunk
+            return text_chunk, ''
+
+        return None, None
+
+    # ── Skip tracking for section context ──
+    in_education_section = False
 
     lines = text.split('\n')
     for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
+        raw_line = line.strip()
+        if not raw_line:
             continue
 
-        match = re.search(date_pattern, line, re.IGNORECASE)
-        if not match:
+        # Track section headers to skip education/certificate entries
+        if SECTION_KEYWORDS.match(raw_line):
+            header_lower = raw_line.lower()
+            in_education_section = any(
+                kw in header_lower for kw in
+                ('education', 'certificate', 'certification', 'license', 'award', 'course', 'training')
+            )
             continue
 
-        start_year = match.group(1)
-        end_year = match.group(2) or (match.group(3) if match.group(3) else str(datetime.now().year))
-        if end_year.lower() in ('present', 'current', 'now'):
-            end_year = str(datetime.now().year)
-
-        # Try to extract month for more precision
-        start_month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*' + start_year, line, re.IGNORECASE)
-        end_month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*' + (match.group(2) or ''), line, re.IGNORECASE)
-
-        month_map = {'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
-                     'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'}
-
-        start_month = month_map.get(start_month_match.group(1).lower()[:3], '01') if start_month_match else '01'
-        end_month = month_map.get(end_month_match.group(1).lower()[:3], '12') if end_month_match else '12'
-
-        start_date = f"{start_year}-{start_month}-01"
-        end_date = f"{end_year}-{end_month}-01"
-
-        # Extract company and role from the text before the date range
-        prefix = line[:match.start()].strip().rstrip('|,–—-').strip()
-
-        # Try splitting by common delimiters
-        parts = re.split(r'\s*[|,]\s*', prefix)
-        parts = [p.strip() for p in parts if p.strip()]
-
-        # Heuristic: role titles usually contain these keywords
-        _role_keywords = re.compile(
-            r'\b(engineer|developer|manager|director|analyst|scientist|intern|lead|head|vp|cto|ceo|coo|architect|consultant|designer|coordinator|specialist|officer|associate|assistant|fellow|researcher|professor|instructor)\b',
-            re.IGNORECASE,
+        # Reset section on career-related headers
+        career_header = re.match(
+            r'^\s*(?:#|\*)*\s*(?:experience|career|work|employment|professional)\b',
+            raw_line, re.IGNORECASE,
         )
+        if career_header:
+            in_education_section = False
+            continue
 
-        if len(parts) >= 2:
-            # If first part looks like a role and second doesn't, swap
-            if _role_keywords.search(parts[0]) and not _role_keywords.search(parts[1]):
-                role = parts[0]
-                company = parts[1]
+        result = _try_match_date(raw_line)
+        if not result:
+            continue
+
+        match, sy, sm, ey, em = result
+
+        # Skip entries in education/certificate sections
+        if in_education_section:
+            continue
+
+        start_date = f"{sy}-{sm}-01"
+        end_date = f"{ey}-{em}-01"
+
+        company, role = _extract_company_role(raw_line, match, i, lines)
+
+        if not company and not role:
+            continue
+
+        # Clean up artifacts
+        for cleanup_target in ('company', 'role'):
+            val = company if cleanup_target == 'company' else role
+            val = re.sub(r'^[-•·#*:;\s]+', '', val).strip()
+            val = re.sub(r'[-•·#*:;\s]+$', '', val).strip()
+            # Remove leading emoji
+            val = re.sub(r'^[\U0001F300-\U0001FAFF\u2600-\u27BF]+\s*', '', val).strip()
+            if cleanup_target == 'company':
+                company = val
             else:
-                company = parts[0]
-                role = parts[1]
-        elif len(parts) == 1:
-            # Check previous line for context
-            company = parts[0]
-            role = ''
-            if i > 0:
-                prev = lines[i - 1].strip()
-                if prev and not re.search(date_pattern, prev, re.IGNORECASE):
-                    role = company
-                    company = prev
-        else:
-            company = 'Unknown Company'
-            role = ''
+                role = val
 
-        # Clean up common artifacts
-        company = re.sub(r'^[-•·\s]+', '', company).strip()
-        role = re.sub(r'^[-•·\s]+', '', role).strip()
+        if not company or len(company) < 2:
+            continue
 
-        if company:
-            entries.append({
-                'company': company,
-                'role': role or 'Role',
-                'start': start_date,
-                'end': end_date,
-            })
+        entries.append({
+            'company': company,
+            'role': role or 'Role',
+            'start': start_date,
+            'end': end_date,
+        })
 
     return entries
 
 
 def _build_timeline_plot(career_entries: list[dict], container):
-    """Build a Plotly horizontal bar (Gantt-style) timeline chart."""
+    """Build a Plotly timeline chart — labels on the left, bars on the right."""
     container.clear()
 
     if not career_entries:
@@ -116,82 +373,88 @@ def _build_timeline_plot(career_entries: list[dict], container):
     companies = list(dict.fromkeys(e['company'] for e in career_entries))
     color_map = {c: COMPANY_COLORS[i % len(COMPANY_COLORS)] for i, c in enumerate(companies)}
 
-    # Sort by start date
+    # Sort by start date (oldest first)
     sorted_entries = sorted(career_entries, key=lambda e: e['start'])
 
     import plotly.graph_objects as go
 
     fig = go.Figure()
 
-    for entry in sorted_entries:
+    bar_height = 0.3
+
+    # One trace per entry — use millisecond timestamps for JSON safety
+    for idx, entry in enumerate(sorted_entries):
         start = datetime.strptime(entry['start'], '%Y-%m-%d')
         end = datetime.strptime(entry['end'], '%Y-%m-%d')
         color = color_map[entry['company']]
-        label = f"{entry['company']}"
+        y_pos = idx
+
+        start_ms = start.timestamp() * 1000
+        duration_ms = (end - start).total_seconds() * 1000
 
         fig.add_trace(go.Bar(
-            x=[(end - start).days],
-            y=[f"{entry['role']}"],
-            base=[start.timestamp() * 1000],
+            x=[duration_ms],
+            y=[y_pos],
+            base=[start_ms],
             orientation='h',
-            marker=dict(color=color, line=dict(width=0)),
-            name=label,
-            text=f"{entry['company']}<br>{entry['role']}<br>{entry['start'][:7]} → {entry['end'][:7]}",
-            textposition='inside',
-            insidetextanchor='middle',
+            marker=dict(color=color, line=dict(width=0), cornerradius=4),
+            width=bar_height * 2,
+            showlegend=False,
             hovertemplate=(
                 f"<b>{entry['company']}</b><br>"
                 f"{entry['role']}<br>"
-                f"{entry['start'][:7]} → {entry['end'][:7]}<br>"
+                f"{entry['start'][:7]} → {entry['end'][:7]}"
                 f"<extra></extra>"
             ),
-            showlegend=label not in [t.name for t in fig.data[:-1]] if fig.data else True,
         ))
 
+    # Y-axis labels: "Company · Role\nYYYY-MM → YYYY-MM"
+    y_labels = []
+    for entry in sorted_entries:
+        y_labels.append(
+            f"<b>{entry['company']}</b> · {entry['role']}<br>"
+            f"<span style='color:#666;font-size:11px'>{entry['start'][:7]} → {entry['end'][:7]}</span>"
+        )
+
     fig.update_layout(
-        barmode='stack',
+        barmode='overlay',
         xaxis=dict(
             type='date',
-            title='',
-            gridcolor='#2a2a3a',
+            gridcolor='#1e1e2e',
             tickformat='%Y',
+            side='bottom',
+            tickfont=dict(size=11, color='#666'),
+            zeroline=False,
         ),
         yaxis=dict(
-            title='',
+            tickmode='array',
+            tickvals=list(range(len(sorted_entries))),
+            ticktext=y_labels,
             autorange='reversed',
-            gridcolor='#2a2a3a',
+            showgrid=False,
+            tickfont=dict(size=12),
+            ticklabelposition='outside',
         ),
         plot_bgcolor='#0a0a0f',
         paper_bgcolor='#0a0a0f',
         font=dict(color='#e8e8f0', family='Outfit, sans-serif'),
-        margin=dict(l=10, r=10, t=40, b=40),
-        height=max(200, len(sorted_entries) * 60 + 80),
-        legend=dict(
-            orientation='h',
-            yanchor='bottom',
-            y=1.02,
-            xanchor='left',
-            x=0,
-            font=dict(size=11),
-        ),
-        title=dict(
-            text='Career Timeline',
-            font=dict(size=16, color='#8888a0', family='JetBrains Mono, monospace'),
-            x=0,
-            xanchor='left',
-        ),
+        margin=dict(l=250, r=20, t=20, b=40),
+        height=max(180, len(sorted_entries) * 70 + 60),
+        bargap=0.3,
     )
 
     with container:
         ui.plotly(fig).classes('w-full')
 
-    # Color legend beneath the chart
+    # Compact color legend
     with container:
-        with ui.row().classes('gap-3 flex-wrap mt-2'):
+        with ui.row().classes('gap-4 flex-wrap mt-1 px-2'):
             for company, color in color_map.items():
                 with ui.row().classes('items-center gap-1'):
-                    ui.element('div').style(f'width: 12px; height: 12px; border-radius: 2px; background: {color};')
-                    ui.label(company).classes('text-xs text-gray-400')
+                    ui.element('div').style(
+                        f'width: 10px; height: 10px; border-radius: 2px; background: {color};'
+                    )
+                    ui.label(company).classes('text-xs text-gray-500')
 
 
 def build_career_tab():
@@ -210,8 +473,28 @@ def build_career_tab():
                 _build_timeline_section()
 
 
+def _merge_entries(entries, status_label, timeline_container, render_list_fn):
+    """Merge parsed career entries into storage and refresh the UI."""
+    if not entries:
+        status_label.text = 'No career entries detected. Try adding manually below.'
+        status_label.classes(remove='text-amber-400 text-green-400', add='text-red-400')
+        return
+
+    existing = app.storage.general.get('career_timeline', [])
+    existing_keys = {(e['company'], e['start']) for e in existing}
+    new_entries = [e for e in entries if (e['company'], e['start']) not in existing_keys]
+    existing.extend(new_entries)
+    app.storage.general['career_timeline'] = existing
+
+    status_label.text = f'Extracted {len(new_entries)} new career entries! ({len(entries)} total found)'
+    status_label.classes(remove='text-amber-400 text-red-400', add='text-green-400')
+
+    _build_timeline_plot(existing, timeline_container)
+    render_list_fn()
+
+
 def _build_timeline_section():
-    """Career path timeline: upload resume / paste Notion link, view & edit timeline."""
+    """Career path timeline: upload resume / paste text, view & edit timeline."""
 
     with ui.column().classes('w-full gap-4'):
         ui.label('CAREER PATH').classes('text-3xl font-extrabold')
@@ -223,7 +506,7 @@ def _build_timeline_section():
 
             with ui.tabs().props('dense no-caps').classes('w-full') as import_tabs:
                 pdf_tab = ui.tab('pdf', label='Upload PDF')
-                notion_tab = ui.tab('notion', label='Notion Link')
+                paste_tab = ui.tab('paste', label='Paste Text')
 
             with ui.tab_panels(import_tabs, value=pdf_tab).classes('w-full'):
                 with ui.tab_panel(pdf_tab):
@@ -236,12 +519,10 @@ def _build_timeline_section():
 
                         try:
                             import pdfplumber
-                            # Save uploaded file
                             file_path = os.path.join(UPLOAD_DIR, e.name)
                             with open(file_path, 'wb') as f:
                                 f.write(e.content.read())
 
-                            # Extract text
                             full_text = ''
                             with pdfplumber.open(file_path) as pdf:
                                 for page in pdf.pages:
@@ -253,24 +534,7 @@ def _build_timeline_section():
                                 return
 
                             entries = _parse_resume_text(full_text)
-
-                            if not entries:
-                                upload_status.text = 'No career entries detected. Try adding manually below.'
-                                upload_status.classes(remove='text-amber-400 text-green-400', add='text-red-400')
-                                return
-
-                            # Merge with existing (avoid duplicates by company+start)
-                            existing = app.storage.general.get('career_timeline', [])
-                            existing_keys = {(e['company'], e['start']) for e in existing}
-                            new_entries = [e for e in entries if (e['company'], e['start']) not in existing_keys]
-                            existing.extend(new_entries)
-                            app.storage.general['career_timeline'] = existing
-
-                            upload_status.text = f'Extracted {len(new_entries)} new career entries! ({len(entries)} total found in PDF)'
-                            upload_status.classes(remove='text-amber-400 text-red-400', add='text-green-400')
-
-                            _build_timeline_plot(app.storage.general['career_timeline'], timeline_container)
-                            _render_entries_list()
+                            _merge_entries(entries, upload_status, timeline_container, _render_entries_list)
 
                         except Exception as ex:
                             upload_status.text = f'Error parsing PDF: {ex}'
@@ -283,55 +547,26 @@ def _build_timeline_section():
                         max_files=1,
                     ).props('accept=".pdf" flat bordered').classes('w-full')
 
-                with ui.tab_panel(notion_tab):
-                    ui.label('Paste a public Notion page URL to extract career data.').classes('text-sm text-gray-400 mb-2')
-                    notion_input = ui.input('Notion URL', placeholder='https://notion.so/...').classes('w-full')
-                    notion_status = ui.label('').classes('text-sm')
+                with ui.tab_panel(paste_tab):
+                    ui.label(
+                        'Paste your resume text, LinkedIn experience, or Notion page content. '
+                        'Include company names with date ranges (e.g. "Google, Engineer, Jan 2020 - Dec 2023").'
+                    ).classes('text-sm text-gray-400 mb-2')
+                    paste_input = ui.textarea('Paste resume / career text here').classes('w-full').props('rows=8')
+                    paste_status = ui.label('').classes('text-sm')
 
-                    async def fetch_notion():
-                        url = notion_input.value.strip()
-                        if not url:
-                            ui.notify('Please enter a Notion URL', type='warning')
+                    def parse_pasted_text():
+                        text = paste_input.value.strip()
+                        if not text:
+                            ui.notify('Please paste some text first', type='warning')
                             return
 
-                        notion_status.text = 'Fetching page content...'
-                        notion_status.classes(remove='text-red-400 text-green-400', add='text-amber-400')
+                        entries = _parse_resume_text(text)
+                        _merge_entries(entries, paste_status, timeline_container, _render_entries_list)
+                        if entries:
+                            paste_input.value = ''
 
-                        try:
-                            import urllib.request
-                            # For public Notion pages, fetch the HTML and extract text
-                            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                            with urllib.request.urlopen(req, timeout=15) as resp:
-                                html = resp.read().decode('utf-8', errors='ignore')
-
-                            # Strip HTML tags to get plain text
-                            text = re.sub(r'<[^>]+>', ' ', html)
-                            text = re.sub(r'\s+', ' ', text)
-
-                            entries = _parse_resume_text(text)
-
-                            if not entries:
-                                notion_status.text = 'No career entries detected from the page. Try adding manually.'
-                                notion_status.classes(remove='text-amber-400 text-green-400', add='text-red-400')
-                                return
-
-                            existing = app.storage.general.get('career_timeline', [])
-                            existing_keys = {(e['company'], e['start']) for e in existing}
-                            new_entries = [e for e in entries if (e['company'], e['start']) not in existing_keys]
-                            existing.extend(new_entries)
-                            app.storage.general['career_timeline'] = existing
-
-                            notion_status.text = f'Extracted {len(new_entries)} new career entries!'
-                            notion_status.classes(remove='text-amber-400 text-red-400', add='text-green-400')
-
-                            _build_timeline_plot(app.storage.general['career_timeline'], timeline_container)
-                            _render_entries_list()
-
-                        except Exception as ex:
-                            notion_status.text = f'Error fetching page: {ex}'
-                            notion_status.classes(remove='text-amber-400 text-green-400', add='text-red-400')
-
-                    ui.button('Fetch & Parse', icon='download', on_click=fetch_notion).props('color=primary')
+                    ui.button('Parse & Import', icon='upload', on_click=parse_pasted_text).props('color=primary')
 
         # ── Timeline Plot ──
         timeline_container = ui.column().classes('w-full')
