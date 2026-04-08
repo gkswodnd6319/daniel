@@ -657,7 +657,9 @@ def fetch_lol_intl_schedule():
                     timeout=10,
                 )
                 resp.raise_for_status()
-                schedule = resp.json()['data']['schedule']
+                schedule = resp.json().get('data', {}).get('schedule')
+                if not schedule:
+                    break
                 page_events = schedule.get('events', [])
                 events.extend(page_events)
 

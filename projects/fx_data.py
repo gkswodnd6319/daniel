@@ -1,42 +1,30 @@
 """FX data layer — live rates + historical time series.
 
-Live rates:   Finnhub (finnhub.io) — free key, real-time forex quotes.
-Fallback:     ExchangeRate-API (open.er-api.com) — no key, daily updates.
+Live rates:   Upbit CRIX API (서울외국환중개 data, free, no key, updates during KRW market hours).
+Real-time:    Upbit WebSocket KRW-USDT (free, no key, 24/7 sub-second ticks).
+Fallback:     ExchangeRate-API (open.er-api.com) — no key, daily updates, 166 currencies.
 History:      Frankfurter API (frankfurter.dev) — free, no key, ECB data.
 """
 
-import os
 import httpx
 import logging
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-FINNHUB_KEY = os.getenv('FINNHUB_API_KEY', '')
-FINNHUB_API = 'https://finnhub.io/api/v1'
+UPBIT_CRIX_API = 'https://crix-api-cdn.upbit.com/v1/forex/recent'
 FALLBACK_API = 'https://open.er-api.com/v6/latest'
 HISTORY_API = 'https://api.frankfurter.dev/v1'
 
 _cache = {}
-_LIVE_TTL = 30       # Finnhub: refresh every 30 seconds
+_LIVE_TTL = 30       # Upbit CRIX: refresh every 30 seconds
 _HISTORY_TTL = 600   # historical: refresh every 10 minutes
 
-# Finnhub uses OANDA pair format: "OANDA:BASE_QUOTE"
-# For KRW base we fetch "OANDA:USD_KRW" and invert where needed.
-# Not all KRW pairs exist directly — we fetch via USD cross rates.
-_FINNHUB_DIRECT_PAIRS = {
-    'USD': 'OANDA:USD_KRW',
-    'EUR': 'OANDA:EUR_KRW',
-    'GBP': 'OANDA:GBP_KRW',
-    'JPY': 'OANDA:USD_JPY',   # cross via USD
-    'CNY': 'OANDA:USD_CNH',   # offshore CNY
-    'AUD': 'OANDA:AUD_USD',   # cross via USD
-    'CAD': 'OANDA:USD_CAD',   # cross via USD
-    'CHF': 'OANDA:USD_CHF',   # cross via USD
-    'SGD': 'OANDA:USD_SGD',   # cross via USD
-    'HKD': 'OANDA:USD_HKD',   # cross via USD
+# Upbit CRIX currency codes
+UPBIT_CODES = {
+    'USD': 'FRX.KRWUSD', 'EUR': 'FRX.KRWEUR', 'JPY': 'FRX.KRWJPY',
+    'GBP': 'FRX.KRWGBP', 'CNY': 'FRX.KRWCNY', 'CAD': 'FRX.KRWCAD',
+    'AUD': 'FRX.KRWAUD', 'CHF': 'FRX.KRWCHF',
 }
 
 POPULAR_CURRENCIES = [
@@ -90,52 +78,48 @@ def _cached(key, fetch_fn, ttl):
     return data
 
 
-def _finnhub_quote(symbol):
-    """Fetch a single real-time quote from Finnhub."""
-    if not FINNHUB_KEY or FINNHUB_KEY == 'your_key_here':
-        return None
-    try:
-        resp = httpx.get(f'{FINNHUB_API}/quote', params={
-            'symbol': symbol, 'token': FINNHUB_KEY,
-        }, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get('c', 0) == 0:
+def fetch_upbit_crix():
+    """Fetch live KRW FX rates from Upbit CRIX (서울외국환중개 data).
+    Returns dict of currency -> {basePrice, openingPrice, highPrice, lowPrice,
+    changePrice, signedChangePrice, signedChangeRate, high52wPrice, low52wPrice, ...}
+    """
+    def _fetch():
+        try:
+            codes = ','.join(UPBIT_CODES.values())
+            resp = httpx.get(UPBIT_CRIX_API, params={'codes': codes}, timeout=5)
+            resp.raise_for_status()
+            result = {}
+            for item in resp.json():
+                cur_code = item.get('currencyCode', '')
+                if cur_code:
+                    result[cur_code] = item
+            return result
+        except Exception as e:
+            logger.error(f'Upbit CRIX fetch failed: {e}')
             return None
-        return data  # {c: current, h: high, l: low, o: open, pc: prev close, t: timestamp}
-    except Exception as e:
-        logger.error(f'Finnhub quote {symbol}: {e}')
-        return None
-
-
-def _finnhub_rates(base='KRW'):
-    """Fetch all FX rates from Finnhub /forex/rates endpoint."""
-    if not FINNHUB_KEY or FINNHUB_KEY == 'your_key_here':
-        return None
-    try:
-        resp = httpx.get(f'{FINNHUB_API}/forex/rates', params={
-            'base': base, 'token': FINNHUB_KEY,
-        }, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get('quote', {})
-    except Exception as e:
-        logger.error(f'Finnhub rates: {e}')
-        return None
+    return _cached('upbit_crix', _fetch, ttl=_LIVE_TTL)
 
 
 def fetch_latest(base='KRW'):
-    """Fetch live rates. Tries Finnhub first, falls back to ExchangeRate-API."""
+    """Fetch live rates. Tries Upbit CRIX first, falls back to ExchangeRate-API.
+    Returns dict with 'rates' (currency -> rate as fraction of KRW), 'date', 'source'.
+    """
     def _fetch():
-        # Try Finnhub real-time rates
-        finnhub_rates = _finnhub_rates(base)
-        if finnhub_rates:
-            return {
-                'rates': finnhub_rates,
-                'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S KST'),
-                'source': 'Finnhub (real-time)',
-                'base': base,
-            }
+        # Try Upbit CRIX (official 서울외국환중개 rates)
+        crix = fetch_upbit_crix()
+        if crix:
+            rates = {}
+            for cur, data in crix.items():
+                bp = data.get('basePrice', 0)
+                if bp:
+                    rates[cur] = 1 / bp  # convert KRW-per-unit to unit-per-KRW
+            if rates:
+                return {
+                    'rates': rates,
+                    'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S KST'),
+                    'source': 'Upbit CRIX (서울외국환중개)',
+                    'base': base,
+                }
 
         # Fallback to ExchangeRate-API
         try:
@@ -151,78 +135,9 @@ def fetch_latest(base='KRW'):
                 'base': base,
             }
         except Exception as e:
-            logger.error(f'Failed to fetch live rates: {e}')
+            logger.error(f'Fallback rates fetch failed: {e}')
             return None
     return _cached(f'live_{base}', _fetch, ttl=_LIVE_TTL)
-
-
-def fetch_quote_detail(target='USD', base='KRW'):
-    """Fetch detailed quote (open/high/low/close/prev) for a single pair from Finnhub."""
-    symbol = _FINNHUB_DIRECT_PAIRS.get(target)
-    if not symbol:
-        return None
-
-    def _fetch():
-        q = _finnhub_quote(symbol)
-        if not q:
-            return None
-        # Determine how to convert to KRW per 1 target
-        if target in ('USD', 'EUR', 'GBP'):
-            # Direct KRW pairs: OANDA:USD_KRW -> value IS KRW per 1 target
-            return {
-                'current': q['c'], 'open': q['o'], 'high': q['h'],
-                'low': q['l'], 'prev_close': q['pc'], 'timestamp': q.get('t', 0),
-            }
-        elif target == 'JPY':
-            # USD_JPY: need USD_KRW / USD_JPY to get KRW per 1 JPY
-            usd_krw = _finnhub_quote('OANDA:USD_KRW')
-            if not usd_krw:
-                return None
-            return {
-                'current': usd_krw['c'] / q['c'] if q['c'] else 0,
-                'open': usd_krw['o'] / q['o'] if q['o'] else 0,
-                'high': usd_krw['h'] / q['l'] if q['l'] else 0,  # high KRW/JPY when USD/JPY is low
-                'low': usd_krw['l'] / q['h'] if q['h'] else 0,
-                'prev_close': usd_krw['pc'] / q['pc'] if q['pc'] else 0,
-                'timestamp': q.get('t', 0),
-            }
-        else:
-            # Cross via USD: need USD_KRW quote too
-            usd_krw = _finnhub_quote('OANDA:USD_KRW')
-            if not usd_krw:
-                return None
-            # For USD_XXX pairs (CAD, CHF, SGD, HKD): KRW per 1 XXX = USD_KRW / USD_XXX
-            # For XXX_USD pairs (AUD): KRW per 1 XXX = USD_KRW * XXX_USD
-            if target == 'AUD':
-                return {
-                    'current': usd_krw['c'] * q['c'],
-                    'open': usd_krw['o'] * q['o'],
-                    'high': usd_krw['h'] * q['h'],
-                    'low': usd_krw['l'] * q['l'],
-                    'prev_close': usd_krw['pc'] * q['pc'],
-                    'timestamp': q.get('t', 0),
-                }
-            elif target == 'CNY':
-                # USD_CNH: KRW per 1 CNY = USD_KRW / USD_CNH
-                return {
-                    'current': usd_krw['c'] / q['c'] if q['c'] else 0,
-                    'open': usd_krw['o'] / q['o'] if q['o'] else 0,
-                    'high': usd_krw['h'] / q['l'] if q['l'] else 0,
-                    'low': usd_krw['l'] / q['h'] if q['h'] else 0,
-                    'prev_close': usd_krw['pc'] / q['pc'] if q['pc'] else 0,
-                    'timestamp': q.get('t', 0),
-                }
-            else:
-                # USD_XXX: KRW per 1 XXX = USD_KRW / USD_XXX
-                return {
-                    'current': usd_krw['c'] / q['c'] if q['c'] else 0,
-                    'open': usd_krw['o'] / q['o'] if q['o'] else 0,
-                    'high': usd_krw['h'] / q['l'] if q['l'] else 0,
-                    'low': usd_krw['l'] / q['h'] if q['h'] else 0,
-                    'prev_close': usd_krw['pc'] / q['pc'] if q['pc'] else 0,
-                    'timestamp': q.get('t', 0),
-                }
-    return _cached(f'quote_{base}_{target}', _fetch, ttl=_LIVE_TTL)
 
 
 def get_last_updated(base='KRW'):
@@ -290,17 +205,13 @@ def fetch_multi_history(base='KRW', targets=None, days=90):
     return _cached(key, _fetch, ttl=_HISTORY_TTL)
 
 
-def is_finnhub_active():
-    """Check if Finnhub API key is configured and working."""
-    return bool(FINNHUB_KEY and FINNHUB_KEY != 'your_key_here')
-
-
 def warm_cache(base='KRW'):
-    """Pre-fetch FX data in a background thread so the Rich Man tab loads instantly."""
+    """Pre-fetch FX data in a background thread."""
     import threading
 
     def _warm():
         try:
+            fetch_upbit_crix()
             fetch_latest(base)
             for cur in ['USD', 'EUR', 'JPY', 'GBP', 'CNY', 'CAD']:
                 fetch_history(base, cur, days=7)

@@ -17,13 +17,67 @@ from nicegui import ui, app
 from datetime import datetime
 from projects.fx_data import (
     fetch_latest, fetch_history, fetch_multi_history, get_last_updated,
-    get_currency_options, get_currency_label, CURRENCY_META,
-    is_finnhub_active, _cache as _fx_cache,
+    get_currency_options, CURRENCY_META,
+    _cache as _fx_cache,
 )
 from projects.fx_ws import fx_stream
 
 
 def build_rich_man_tab():
+    """Rich Man — left sidebar with Dashboard / Simulation tabs."""
+    from projects.fx_sim import build_simulation_tab
+
+    with ui.row().classes('w-full h-full gap-0'):
+        # Left sidebar
+        with ui.column().classes('gap-0').style(
+            'width: 180px; min-height: 100%; background: #0a0a0f; '
+            'border-right: 1px solid #2a2a3a; padding-top: 16px;'
+        ):
+            ui.label('RICH MAN').classes('text-sm font-extrabold px-4 mb-4').style(
+                'background: linear-gradient(135deg, #ffd740 0%, #ff9100 100%); '
+                '-webkit-background-clip: text; -webkit-text-fill-color: transparent;'
+            )
+
+            nav_buttons = {}
+            active_page = {'value': 'dashboard'}
+
+            def switch_page(page):
+                active_page['value'] = page
+                for name, btn in nav_buttons.items():
+                    if name == page:
+                        btn.style('background: #1a1a2a; color: #ffd740; border-left: 3px solid #ffd740;')
+                    else:
+                        btn.style('background: transparent; color: #888; border-left: 3px solid transparent;')
+                dashboard_panel.set_visibility(page == 'dashboard')
+                sim_panel.set_visibility(page == 'simulation')
+
+            for name, icon, label in [
+                ('dashboard', 'dashboard', 'Dashboard'),
+                ('simulation', 'science', 'Paper Trade'),
+            ]:
+                btn = ui.button(label, icon=icon, on_click=lambda n=name: switch_page(n)).props(
+                    'flat no-caps align=left'
+                ).classes('w-full justify-start px-4 py-2 text-sm').style(
+                    'border-radius: 0; border-left: 3px solid transparent; color: #888;'
+                )
+                nav_buttons[name] = btn
+
+            # Set initial active
+            nav_buttons['dashboard'].style('background: #1a1a2a; color: #ffd740; border-left: 3px solid #ffd740;')
+
+        # Right content area
+        with ui.column().classes('flex-grow gap-0').style('overflow-y: auto;'):
+            dashboard_panel = ui.column().classes('w-full')
+            with dashboard_panel:
+                _build_dashboard()
+
+            sim_panel = ui.column().classes('w-full')
+            sim_panel.set_visibility(False)
+            with sim_panel:
+                build_simulation_tab()
+
+
+def _build_dashboard():
     """FX trading dashboard — KRW base."""
 
     base = 'KRW'
@@ -60,30 +114,21 @@ def build_rich_man_tab():
         def _update_status():
             if fx_stream.connected:
                 ws_dot.style('color: #00e676; font-size: 10px;')
-                status_label.text = 'Streaming live'
-            elif is_finnhub_active():
-                ws_dot.style('color: #ff9100; font-size: 10px;')
-                status_label.text = 'Connecting...'
+                status_label.text = 'Streaming live via Upbit'
             else:
-                ws_dot.style('color: #555; font-size: 10px;')
+                ws_dot.style('color: #ff9100; font-size: 10px;')
                 ts, ago, source = get_last_updated(base)
                 if ts:
-                    status_label.text = f'{source} | {ts}'
+                    status_label.text = f'{source} | {ts} ({ago}s ago)'
                 else:
-                    status_label.text = 'No data'
+                    status_label.text = 'Connecting...'
 
         with ui.row().classes('w-full items-center gap-2 -mt-2'):
             ui.label(f'Base: {CURRENCY_META[base][2]} {base} (Korean Won)').classes(
                 'mono text-xs text-gray-500'
             )
-            if is_finnhub_active():
-                ui.badge('LIVE').props('color="green" text-color="white"').classes('text-xs')
-                ui.label('Real-time via Finnhub websocket').classes('text-xs text-gray-600')
-            else:
-                ui.badge('DAILY').props('color="gray"').classes('text-xs')
-                ui.label(
-                    'Add FINNHUB_API_KEY to .env for real-time streaming'
-                ).classes('text-xs text-gray-600')
+            ui.badge('LIVE').props('color="green" text-color="white"').classes('text-xs')
+            ui.label('Real-time via Upbit · Rates from 서울외국환중개').classes('text-xs text-gray-600')
 
         # ── Live Rate Cards ──
         # Each card has labels that update in-place (no re-render needed)
@@ -144,48 +189,44 @@ def build_rich_man_tab():
 
         render_cards()
 
-        # ── Websocket live updates ──
-        if is_finnhub_active():
-            fx_stream.start()
+        # ── Websocket live updates (USDT/KRW — updates USD card in real-time) ──
+        fx_stream.start()
 
-            def _on_ws_tick(currency, krw_per_unit, ts_str):
-                """Called from websocket thread — schedule UI update."""
-                if currency in card_labels:
-                    labels = card_labels[currency]
-                    sym = labels['symbol']
-                    prev = labels['prev_krw']
+        def _on_ws_tick(price, ts_str):
+            """Called from websocket thread — update USD card live."""
+            if 'USD' in card_labels:
+                labels = card_labels['USD']
+                sym = labels['symbol']
+                prev = labels['prev_krw']
 
-                    labels['price'].text = f'{sym}{krw_per_unit:,.2f}'
-                    labels['time'].text = ts_str
+                labels['price'].text = f'{sym}{price:,.2f}'
+                labels['time'].text = ts_str
 
-                    if prev and prev != krw_per_unit:
-                        diff = krw_per_unit - prev
-                        diff_pct = (diff / prev) * 100
-                        color = '#00e676' if diff <= 0 else '#ff1744'
-                        arrow = '\u25b2' if diff > 0 else '\u25bc'
-                        labels['change'].text = f'{arrow} {abs(diff_pct):.3f}%'
-                        labels['change'].style(f'color: {color}; font-size: 12px; font-weight: 600;')
+                if prev and prev != price:
+                    diff = price - prev
+                    diff_pct = (diff / prev) * 100
+                    color = '#00e676' if diff <= 0 else '#ff1744'
+                    arrow = '\u25b2' if diff > 0 else '\u25bc'
+                    labels['change'].text = f'{arrow} {abs(diff_pct):.3f}%'
+                    labels['change'].style(f'color: {color}; font-size: 12px; font-weight: 600;')
+                    labels['price'].style(f'color: {color};')
+                    labels['prev_krw'] = price
 
-                        # Flash effect: briefly highlight the price
-                        labels['price'].style(f'color: {color};')
-                        labels['prev_krw'] = krw_per_unit
+        fx_stream.on_tick(_on_ws_tick)
 
-            fx_stream.on_tick(_on_ws_tick)
+        # Timer to reset price color back to gold and update status
+        def _reset_colors():
+            if 'USD' in card_labels:
+                card_labels['USD']['price'].style('color: #ffd740;')
+            _update_status()
 
-            # Timer to reset price color back to gold and update status
-            def _reset_colors():
-                for labels in card_labels.values():
-                    labels['price'].style('color: #ffd740;')
-                _update_status()
-
-            ui.timer(2.0, _reset_colors)
+        ui.timer(2.0, _reset_colors)
 
         ui.separator()
 
-        # ── Live Intraday Ticker (websocket only) ──
-        if is_finnhub_active():
-            _build_live_ticker(base, highlight_currencies)
-            ui.separator()
+        # ── Live Intraday Ticker ──
+        _build_live_ticker(base)
+        ui.separator()
 
         # ── Price Trend Chart ──
         _build_price_chart(base)
@@ -232,81 +273,87 @@ def build_rich_man_tab():
         )
 
 
-def _build_live_ticker(base, currencies):
-    """Live intraday mini-chart that updates every 2 seconds from websocket ticks."""
-    ui.label('LIVE TICKER').classes('section-title')
+def _build_live_ticker(base):
+    """Live intraday chart — streams KRW-USDT from Upbit websocket, updates every 2 seconds.
+    Uses in-place chart updates to avoid flicker.
+    """
+    ui.label('LIVE TICKER — USD/KRW (USDT proxy)').classes('section-title')
+    ui.label('Real-time via Upbit KRW-USDT websocket · 24/7').classes('mono text-xs text-gray-500')
 
-    with ui.row().classes('w-full items-end gap-3'):
-        ticker_currency = ui.select(
-            options={c: f'{CURRENCY_META.get(c, ("","",""))[2]} {c}' for c in currencies},
-            value='USD', label='Currency',
-        ).props('dense outlined').classes('text-sm').style('min-width: 150px;')
+    with ui.row().classes('w-full items-center justify-between'):
+        with ui.column().classes('gap-0'):
+            live_price_label = ui.label('Connecting...').classes('mono text-2xl font-extrabold').style('color: #ffd740;')
+            live_time_label = ui.label('').classes('mono text-xs text-gray-500')
+        # Kimchi premium indicator
+        with ui.column().classes('gap-0 items-end'):
+            premium_label = ui.label('').classes('mono text-sm font-bold')
+            premium_note = ui.label('Kimchi Premium (USDT vs official)').classes('mono text-xs text-gray-600')
 
-    live_chart_container = ui.column().classes('w-full')
-    live_price_label = ui.label('').classes('mono text-2xl font-extrabold').style('color: #ffd740;')
-    live_time_label = ui.label('').classes('mono text-xs text-gray-500')
+    # Build the chart ONCE with empty data, then update in-place
+    import plotly.graph_objects as go
 
-    def render_live_chart():
-        live_chart_container.clear()
-        cur = ticker_currency.value
-        ticks = fx_stream.get_tick_history(cur, limit=120)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[], y=[],
+        mode='lines',
+        line=dict(color='#ffd740', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(255,215,64,0.06)',
+        hovertemplate='%{x}<br>\u20a9%{y:,.0f}<extra></extra>',
+    ))
+    fig.update_layout(
+        xaxis=dict(gridcolor='#1e1e2e', tickfont=dict(size=9, color='#555'), showgrid=False),
+        yaxis=dict(gridcolor='#1e1e2e', tickfont=dict(size=10, color='#666'), tickformat=',.0f'),
+        plot_bgcolor='#0a0a0f', paper_bgcolor='#0a0a0f',
+        font=dict(color='#e8e8f0', family='JetBrains Mono, monospace'),
+        margin=dict(l=70, r=10, t=5, b=30),
+        height=200, showlegend=False,
+    )
+    plotly_chart = ui.plotly(fig).classes('w-full')
 
+    def update_live_chart():
+        ticks = fx_stream.get_tick_history(limit=120)
         if len(ticks) < 2:
-            with live_chart_container:
-                ui.label('Waiting for live ticks...').classes('text-gray-500 text-center py-4')
             return
 
         times = [t[0] for t in ticks]
         prices = [t[1] for t in ticks]
-
-        # Update price display
         latest = prices[-1]
-        meta = CURRENCY_META.get(cur, ('', '', ''))
-        live_price_label.text = f'{meta[1]}{latest:,.2f} KRW'
+
+        # Update labels (no re-render, just text swap)
+        live_price_label.text = f'\u20a9{latest:,.0f}'
         live_time_label.text = f'Last tick: {times[-1]} KST'
 
-        import plotly.graph_objects as go
-        fig = go.Figure()
+        # Kimchi premium: compare USDT price vs official CRIX rate
+        from projects.fx_data import fetch_upbit_crix
+        crix = fetch_upbit_crix()
+        if crix and 'USD' in crix:
+            official = crix['USD'].get('basePrice', 0)
+            if official:
+                gap = latest - official
+                gap_pct = (gap / official) * 100
+                gap_color = '#ff9100' if abs(gap_pct) > 0.5 else '#888'
+                sign = '+' if gap >= 0 else ''
+                premium_label.text = f'{sign}{gap_pct:.2f}% ({sign}\u20a9{gap:,.0f})'
+                premium_label.style(f'color: {gap_color};')
 
-        # Color line based on trend
+        # Update chart data in-place (no flicker)
         color = '#00e676' if prices[-1] >= prices[0] else '#ff1744'
-
-        fig.add_trace(go.Scatter(
-            x=times, y=prices,
-            mode='lines',
-            line=dict(color=color, width=2),
-            fill='tozeroy',
-            fillcolor=f'rgba({",".join(str(int(color[i:i+2], 16)) for i in (1,3,5))}, 0.06)',
-            hovertemplate='%{x}<br>\u20a9%{y:,.2f}<extra></extra>',
-        ))
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
 
         rate_min, rate_max = min(prices), max(prices)
         rate_range = rate_max - rate_min if rate_max != rate_min else rate_max * 0.001
         y_pad = rate_range * 0.15
 
-        fig.update_layout(
-            xaxis=dict(
-                gridcolor='#1e1e2e', tickfont=dict(size=9, color='#555'),
-                showgrid=False,
-            ),
-            yaxis=dict(
-                gridcolor='#1e1e2e', tickfont=dict(size=10, color='#666'),
-                tickformat=',.2f', range=[rate_min - y_pad, rate_max + y_pad],
-            ),
-            plot_bgcolor='#0a0a0f', paper_bgcolor='#0a0a0f',
-            font=dict(color='#e8e8f0', family='JetBrains Mono, monospace'),
-            margin=dict(l=70, r=10, t=5, b=30),
-            height=200, showlegend=False,
-        )
+        plotly_chart.figure.data[0].x = times
+        plotly_chart.figure.data[0].y = prices
+        plotly_chart.figure.data[0].line.color = color
+        plotly_chart.figure.data[0].fillcolor = f'rgba({r},{g},{b},0.06)'
+        plotly_chart.figure.layout.yaxis.range = [rate_min - y_pad, rate_max + y_pad]
+        plotly_chart.update()
 
-        with live_chart_container:
-            ui.plotly(fig).classes('w-full')
-
-    ticker_currency.on_value_change(lambda _: render_live_chart())
-
-    # Auto-refresh the chart every 2 seconds
-    ui.timer(2.0, render_live_chart)
-    render_live_chart()
+    # Update every 2 seconds — only swaps data, no DOM rebuild
+    ui.timer(2.0, update_live_chart)
 
 
 def _build_toggle_section(title, icon, description, builder_fn):
