@@ -20,7 +20,7 @@ from datetime import datetime
 
 from career_tab import build_career_tab
 from sports_data import warm_cache as warm_sports_cache, _cache as _sports_cache
-from projects.fx_data import warm_cache as warm_fx_cache, _cache as _fx_cache
+from projects.rich_man.fx_data import warm_cache as warm_fx_cache, _cache as _fx_cache
 
 # Clear stale caches from hot reload, then pre-fetch fresh data
 _sports_cache.clear()

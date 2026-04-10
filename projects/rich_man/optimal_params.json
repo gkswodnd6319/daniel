@@ -1,0 +1,16 @@
+{
+  "ma_period": 48,
+  "buy_dip_pct": 0.05,
+  "sell_gain_pct": 0.4,
+  "max_trades_day": 0,
+  "max_vol_pct": 0.2,
+  "cooldown_hrs": 0,
+  "pnl": 56084.80760896206,
+  "pnl_pct": 5.61,
+  "win_rate": 56.2,
+  "trades": 32,
+  "optimized_at": "2026-04-09 16:38:54",
+  "data_range": "2026-01-09 to 2026-04-09",
+  "seed": 1000000,
+  "wudae_pct": 90
+}
